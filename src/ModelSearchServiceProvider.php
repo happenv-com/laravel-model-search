@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch;
 
+use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Illuminate\Support\ServiceProvider;
 
 final class ModelSearchServiceProvider extends ServiceProvider
@@ -12,6 +13,8 @@ final class ModelSearchServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/model-search.php', 'model-search');
+
+        $this->app->singleton(ModelSearchRegistry::class);
     }
 
     public function boot(): void

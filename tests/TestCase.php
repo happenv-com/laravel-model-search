@@ -6,11 +6,14 @@ namespace Happenv\ModelSearch\Tests;
 
 use Happenv\ModelSearch\ModelSearchServiceProvider;
 use Happenv\ModelSearch\Tests\Fixtures\FixtureSearchServiceProvider;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Orchestra\Testbench\TestCase as Orchestra;
 
 abstract class TestCase extends Orchestra
 {
+    use RefreshDatabase;
+
     protected function getPackageProviders($app): array
     {
         return [ModelSearchServiceProvider::class, FixtureSearchServiceProvider::class];
@@ -36,5 +39,6 @@ abstract class TestCase extends Orchestra
     protected function defineDatabaseMigrations(): void
     {
         DB::statement('CREATE EXTENSION IF NOT EXISTS pg_trgm');
+        $this->loadMigrationsFrom(__DIR__.'/Fixtures/Migrations');
     }
 }
