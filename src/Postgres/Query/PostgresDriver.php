@@ -194,7 +194,7 @@ final readonly class PostgresDriver implements Driver
         }
 
         $query->matched(count($ids));
-        IdNarrowing::narrow($tableQuery, $ids, $this->definition->resolvedKeySqlType());
+        IdNarrowing::narrow($tableQuery, $ids, $this->definition->resolvedKeySqlType(), $query->hostScope());
 
         return $tableQuery;
     }

@@ -110,12 +110,16 @@ final class ModelSearchRegistry
 
     /**
      * Whether the model's index has been built completely at least once, so the `postgres` driver
-     * serves it from the index. A cached answer, at most a few seconds old.
+     * serves it from the index. A cached answer, at most a few seconds old. Always true under the `database` driver, which has no index (and no schema to ask).
      *
      * @param  class-string<Model>  $modelClass
      */
     public function isReady(string $modelClass): bool
     {
+        if (config('model-search.driver') === 'database') {
+            return true;
+        }
+
         return $this->indexState($modelClass)->isReady($this->for($modelClass)->morphAlias);
     }
 
@@ -127,6 +131,10 @@ final class ModelSearchRegistry
      */
     public function isRebuilding(string $modelClass): bool
     {
+        if (config('model-search.driver') === 'database') {
+            return false;
+        }
+
         return $this->indexState($modelClass)->isRebuilding($this->for($modelClass)->morphAlias);
     }
 

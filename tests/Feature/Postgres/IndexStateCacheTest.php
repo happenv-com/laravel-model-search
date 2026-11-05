@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Happenv\ModelSearch\Facades\ModelSearches;
 use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
@@ -59,4 +60,25 @@ it('tells a pending rebuild from a ready index, cached next to the readiness', f
 
     expect($state->isReady('order'))->toBeTrue()
         ->and($state->isRebuilding('order'))->toBeTrue();
+});
+
+it('forgets the cached readiness of a type it sends back to a rebuild', function (): void {
+    $definition = app(ModelSearchRegistry::class)->for(Order::class);
+    $state = new IndexState;
+    $state->recordInstall($definition);
+    DB::table(TableNames::forConnection()->state())->where('subject_type', 'order')->update(['ready_at' => now(), 'rebuild_cursor' => null]);
+    $state->forget('order');
+
+    expect($state->isRebuilding('order'))->toBeFalse();
+
+    $state->markForRebuild(['order']);
+
+    expect($state->isRebuilding('order'))->toBeTrue();
+});
+
+it('answers ready and not rebuilding under the database driver without a state row', function (): void {
+    config(['model-search.driver' => 'database']);
+
+    expect(ModelSearches::isReady(Order::class))->toBeTrue()
+        ->and(ModelSearches::isRebuilding(Order::class))->toBeFalse();
 });

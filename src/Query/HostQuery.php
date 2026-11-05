@@ -49,6 +49,17 @@ final readonly class HostQuery
     }
 
     /**
+     * The query selecting the primary key of every record in scope, to be used as a subquery.
+     */
+    public function keys(): QueryBuilder
+    {
+        $builder = $this->builder->clone();
+        $builder->select($builder->getModel()->getQualifiedKeyName());
+
+        return $builder->applyScopes()->getQuery();
+    }
+
+    /**
      * The statement selecting the primary key of every record in scope.
      *
      * @return array{sql: string, bindings: list<mixed>}

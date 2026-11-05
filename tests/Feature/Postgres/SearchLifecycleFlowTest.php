@@ -136,9 +136,9 @@ it('runs from registration to deletion', function (): void {
     expect(slfSignatures($broad))->toBe(['ORDER-100', 'ORDER-200'])
         ->and(slfSignatures($narrow))->toBe(['ORDER-200']);
 
-    // apply(): the table query (which brings its own scope) is narrowed, and its models carry nothing of the search.
+    // apply(): the table query (and the within() scope) is narrowed, and its models carry nothing of the search.
     $applied = ConfigurableOrderSearch::query('ORDER-')->within(Order::query())->withoutStages()->apply(Order::query())->orderBy('signature')->get();
-    $appliedNarrow = ConfigurableOrderSearch::query('ORDER-')->within(Order::query())->withoutStages()->apply(Order::query()->where('state', 'shipped'))->get();
+    $appliedNarrow = ConfigurableOrderSearch::query('ORDER-')->within(Order::query()->where('state', 'shipped'))->withoutStages()->apply(Order::query())->get();
 
     expect($applied->pluck('signature')->all())->toBe(['ORDER-100', 'ORDER-200'])
         ->and(array_keys($applied->first()->getAttributes()))->not->toContain('search_id')

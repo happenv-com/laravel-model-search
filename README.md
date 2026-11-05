@@ -84,7 +84,7 @@ ModelSearches::extend(MarketOrderSearchExtension::class);
 
 If you use `laravel-true-modular`, the `Happenv\ModelSearch\Integration\TrueModular\RegistersModelSearches` provider trait offers `hasModelSearches([...])` / `hasModelSearchExtensions([...])`; call `processModelSearches()` from the provider's `moduleInitialized()` hook, or nothing is registered. **Experimental:** this two-step registration may change before 1.0.
 
-The facade also answers two questions about the index of a model: `ModelSearches::isReady(Order::class)` (the index has been built completely at least once, so searches are served from it) and `ModelSearches::isRebuilding(Order::class)` (a rebuild is pending: right after installing, or after a definition changed). Both are cached for a few seconds per connection and database.
+The facade also answers two questions about the index of a model: `ModelSearches::isReady(Order::class)` (the index has been built completely at least once, so searches are served from it) and `ModelSearches::isRebuilding(Order::class)` (a rebuild is pending: right after installing, or after a definition changed). Both are cached for a few seconds per connection and database. Under the `database` driver there is no index: `isReady()` is `true` and `isRebuilding()` `false` without touching the schema. `ModelSearches::for()` and `all()` return `CompiledDefinition`, an `@internal` type that may change in any 0.x release.
 
 ### Fields
 
@@ -211,7 +211,7 @@ $query = OrderSearch::query($phrase)
     ->apply(Order::query()->latest());   // changed in place and returned
 ```
 
-Every matching record, unranked; pagination, counting and sorting stay with the table. The models you get back are yours: the narrowing adds no attribute of its own (a query without explicit columns is selected as `<table>.*`). The matching keys are resolved on the search connection and handed to your query as a bound key list, so an `orWhere` on your table query cannot widen the result. A phrase that matches too much throws `SearchTooBroad`: either more than `apply.max_ids` rows in a branch (this counts rows per branch, so the cap bounds the work), or a `via` field with more than 50 parents. Catch it and ask for a longer phrase. `apply()` never returns a silently partial list.
+Every matching record, unranked; pagination, counting and sorting stay with the table. **The result is your table query ∩ the `within()` scope ∩ the matches**, on every driver and path (ready index, fallback while building, `database` driver): the scope's keys are a semi-join on your table query, run on your connection with no phrase in it. `withoutScope()` means no extra narrowing. The models you get back are yours: the narrowing adds no attribute of its own (a query without explicit columns is selected as `<table>.*`). The matching keys are resolved on the search connection and handed to your query as a bound key list, so an `orWhere` on your table query cannot widen the result. A phrase that matches too much throws `SearchTooBroad`: either more than `apply.max_ids` rows in a branch (this counts rows per branch, so the cap bounds the work), or a `via` field with more than 50 parents. Catch it and ask for a longer phrase. `apply()` never returns a silently partial list.
 
 ### `similar()`
 

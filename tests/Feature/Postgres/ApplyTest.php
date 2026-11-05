@@ -96,7 +96,7 @@ describe('narrowing a table', function (): void {
             ->and($empty->log())->toBe([]);
     });
 
-    it('reads keys, name words and the source column, with no scope of the viewer', function (): void {
+    it('reads keys, name words and the source column', function (): void {
         msUse([
             SearchField::key('external_number'),
             SearchField::key('signature')->exactOnSource(),
@@ -106,7 +106,7 @@ describe('narrowing a table', function (): void {
         Order::create(['signature' => 'S-2', 'external_number' => 'OTHER-1', 'customer_name' => 'Anna Nowak']);
         msIndex();
         Order::create(['signature' => 'FRESH-ONE']);
-        $apply = static fn (string $phrase): array => apSignatures(ConfigurableOrderSearch::query($phrase)->within(Order::query()->where('signature', 'never'))->apply(Order::query()));
+        $apply = static fn (string $phrase): array => apSignatures(ConfigurableOrderSearch::query($phrase)->within(Order::query())->apply(Order::query()));
 
         expect($apply('EXT-1234'))->toBe(['S-1'])
             ->and($apply('12345'))->toBe(['S-1'])
@@ -360,6 +360,41 @@ describe('the models apply hands back', function (): void {
         Order::create(['signature' => 'ABCD-1']);
 
         expect(array_keys(apApply('ABCD-1', Order::query()->select('signature'))->first()->getAttributes()))->toBe(['signature']);
+    });
+});
+
+describe('the scope of apply', function (): void {
+    it('returns the same rows on every path: table query, within() scope and matches', function (string $path): void {
+        Order::create(['signature' => 'ABCD-1', 'state' => 'shipped']);
+        Order::create(['signature' => 'ABCD-2', 'state' => 'unshipped']);
+        Order::create(['signature' => 'ABCD-3', 'state' => 'shipped', 'customer_name' => 'x']);
+        Order::create(['signature' => 'OTHER-1', 'state' => 'shipped']);
+        msIndex();
+
+        if ($path === 'database') {
+            config(['model-search.driver' => 'database']);
+        }
+
+        if ($path === 'fallback') {
+            apUnready();
+        }
+
+        $scoped = static fn (): Builder => OrderSearch::query('ABCD')->within(Order::query()->where('state', 'shipped'))->apply(Order::query());
+        $tableNarrowed = OrderSearch::query('ABCD')->within(Order::query()->where('state', 'shipped'))->apply(Order::query()->where('signature', '<>', 'ABCD-3'));
+        $unscoped = OrderSearch::query('ABCD')->withoutScope('test')->apply(Order::query());
+
+        expect(apSignatures($scoped()))->toBe(['ABCD-1', 'ABCD-3'])
+            ->and(apSignatures($tableNarrowed))->toBe(['ABCD-1'])
+            ->and(apSignatures($unscoped))->toBe(['ABCD-1', 'ABCD-2', 'ABCD-3']);
+    })->with(['postgres ready', 'fallback', 'database']);
+
+    it('treats an explicit select of everything like no columns', function (): void {
+        Order::create(['signature' => 'ABCD-1']);
+        msIndex();
+
+        $models = OrderSearch::query('ABCD-1')->within(Order::query())->apply(Order::query()->select('*'))->get();
+
+        expect(array_keys($models->first()->getAttributes()))->not->toContain('search_id');
     });
 });
 

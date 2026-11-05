@@ -196,6 +196,10 @@ final readonly class IndexState
         $marked = array_map(static fn (stdClass $row): string => (string) $row->subject_type, $rows);
         sort($marked);
 
+        foreach ($marked as $type) {
+            $this->forget($type);
+        }
+
         return $marked;
     }
 

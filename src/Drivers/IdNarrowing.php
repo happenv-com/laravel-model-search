@@ -7,6 +7,7 @@ namespace Happenv\ModelSearch\Drivers;
 use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\SearchTooBroad;
+use Happenv\ModelSearch\Query\HostQuery;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 
@@ -74,17 +75,23 @@ final class IdNarrowing
      * @param  Builder<TModel>  $tableQuery
      * @param  list<string>  $ids
      * @param  string  $keyType  The catalog type of the table's key column.
+     * @param  HostQuery|null  $scope  The `within()` scope: the result is the table query, intersected with it, and with the keys. No scope (`withoutScope()`) narrows no further.
      */
-    public static function narrow(Builder $tableQuery, array $ids, string $keyType): void
+    public static function narrow(Builder $tableQuery, array $ids, string $keyType, ?HostQuery $scope = null): void
     {
         $list = $tableQuery->getQuery()->newQuery()->fromRaw(self::unnest($keyType), [Sql::arrayLiteral($ids)])->select('search_ids.search_id');
         $alias = 'search_ids_'.count($tableQuery->getQuery()->joins ?? []);
 
-        if ($tableQuery->getQuery()->columns === null) {
+        if ($tableQuery->getQuery()->columns === null || $tableQuery->getQuery()->columns === ['*']) {
             // Without explicit columns the join would add its own to every model.
             $from = $tableQuery->getQuery()->from;
             $from = is_string($from) ? (preg_split('/\s+as\s+/i', $from)[1] ?? $from) : $tableQuery->getModel()->getTable();
             $tableQuery->select($from.'.*');
+        }
+
+        if ($scope instanceof HostQuery) {
+            // On the host's connection, with no phrase in it: a semi-join of the scope's keys.
+            $tableQuery->whereIn($tableQuery->getModel()->getQualifiedKeyName(), $scope->keys());
         }
 
         $tableQuery->joinSub($list, $alias, $tableQuery->getModel()->getQualifiedKeyName(), '=', $alias.'.search_id');
