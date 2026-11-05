@@ -163,7 +163,7 @@ it('a new version of a definition is installed by the next sync and asks for a r
         ->and($after['ready_at'])->not->toBeNull();
 });
 
-it('hands the refusals to the incomplete-sync exception and the listener logs them', function (): void {
+it('hands the refusals to the incomplete-sync exception, and the migration listener logs them', function (): void {
     DB::table(iwState())->insert(['subject_type' => 'order', 'definition_fingerprint' => 'other', 'definition_version' => 5, 'installed_at' => now()]);
     iwSync()->apply();
     DB::statement('DROP TRIGGER model_search_parcels_ins ON parcels');
@@ -173,6 +173,9 @@ it('hands the refusals to the incomplete-sync exception and the listener logs th
     $other->beginTransaction();
     $other->getPdo()->exec('LOCK TABLE parcels IN ACCESS EXCLUSIVE MODE');
 
+    Log::spy();
+    app()->instance(SchemaSync::class, new SchemaSync(app(ModelSearchRegistry::class), null, '100ms', 1, 10));
+
     try {
         try {
             (new SchemaSync(app(ModelSearchRegistry::class), null, '100ms', 1, 10))->apply();
@@ -181,6 +184,9 @@ it('hands the refusals to the incomplete-sync exception and the listener logs th
             expect($incomplete->refusals)->toHaveCount(1)
                 ->and($incomplete->refusals[0]->isDowngrade)->toBeTrue();
         }
+
+        expect(fn () => app(SyncAfterMigrations::class)->handle(new MigrationsEnded('up', [])))->toThrow(SchemaSyncIncomplete::class);
+        Log::shouldHaveReceived('warning')->atLeast()->once();
     } finally {
         $other->rollBack();
     }

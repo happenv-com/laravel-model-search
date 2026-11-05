@@ -20,6 +20,7 @@ use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderPathInvoiceSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderPathParcelSearch;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
@@ -1131,9 +1132,25 @@ describe('handing kept rows over by age (R15)', function (): void {
             ->and(DB::table(ixTable('entries'))->where('subject_type', 'invoice')->count())->toBe(0);
     });
 
-    it('does not flag a rebuild that is already pending or running', function (): void {
+    it('restarts a rebuild that started before the handed-off change and is already past the root', function (): void {
         ixForeignInvoice();
-        DB::table(ixTable('state'))->where('subject_type', 'invoice')->update(['rebuild_cursor' => 'abc']);
+        DB::table(ixTable('state'))->where('subject_type', 'invoice')->update(['rebuild_cursor' => 'abc', 'sweep_cursor' => null, 'rebuild_started_at' => now()->subHours(3)]);
+        $registry = ixSharedRegistry();
+        $order = ixOrder();
+        DB::table(ixTable('changes'))->delete();
+        DB::table(ixTable('changes'))->insert(['node_type' => 'table:orders', 'node_id' => $order, 'changed_at' => now()->subHours(2)]);
+
+        ixIndexer($registry)->drainNow();
+        $row = DB::table(ixTable('state'))->where('subject_type', 'invoice')->first();
+
+        expect($row->rebuild_cursor)->toBe('')
+            ->and($row->sweep_cursor)->toBeNull()
+            ->and(Carbon::parse($row->rebuild_started_at)->isAfter(now()->subMinutes(5)))->toBeTrue();
+    });
+
+    it('leaves a rebuild that started after the handed-off change alone', function (): void {
+        ixForeignInvoice();
+        DB::table(ixTable('state'))->where('subject_type', 'invoice')->update(['rebuild_cursor' => 'abc', 'rebuild_started_at' => now()->subMinutes(30)]);
         $registry = ixSharedRegistry();
         $order = ixOrder();
         DB::table(ixTable('changes'))->delete();
@@ -1142,6 +1159,44 @@ describe('handing kept rows over by age (R15)', function (): void {
         ixIndexer($registry)->drainNow();
 
         expect(DB::table(ixTable('state'))->where('subject_type', 'invoice')->value('rebuild_cursor'))->toBe('abc');
+    });
+
+    it('leaves a rebuild that has not left the start alone', function (): void {
+        ixForeignInvoice();
+        DB::table(ixTable('state'))->where('subject_type', 'invoice')->update(['rebuild_cursor' => '', 'sweep_cursor' => 'zzz', 'rebuild_started_at' => now()->subHours(3)]);
+        $registry = ixSharedRegistry();
+        $order = ixOrder();
+        DB::table(ixTable('changes'))->delete();
+        DB::table(ixTable('changes'))->insert(['node_type' => 'table:orders', 'node_id' => $order, 'changed_at' => now()->subHours(2)]);
+
+        ixIndexer($registry)->drainNow();
+        $row = DB::table(ixTable('state'))->where('subject_type', 'invoice')->first();
+
+        expect($row->rebuild_cursor)->toBe('')
+            ->and($row->sweep_cursor)->toBe('zzz');
+    });
+
+    it('does not re-read kept rows within one drain', function (): void {
+        ixForeignInvoice();
+        config(['model-search.drain.rows' => 2]);
+        $registry = ixSharedRegistry();
+        $order = ixOrder();
+        DB::table(ixTable('changes'))->delete();
+        DB::table(ixTable('changes'))->insert([
+            ['node_type' => 'table:orders', 'node_id' => $order],
+            ['node_type' => 'table:orders', 'node_id' => $order.'-x'],
+            ['node_type' => 'table:orders', 'node_id' => $order.'-y'],
+        ]);
+        $parcel = ixParcel($order, 'P-9');
+        DB::table(ixTable('changes'))->where('node_type', 'parcel')->delete();
+        DB::table(ixTable('changes'))->insert(['node_type' => 'parcel', 'node_id' => $parcel]);
+
+        $stats = ixIndexer($registry)->drainNow();
+
+        // The three young kept rows are read once each; the later parcel row is still reached.
+        expect($stats->logRowsRead)->toBe(4)
+            ->and(ixKeys('parcel', $parcel))->not->toBe([])
+            ->and(DB::table(ixTable('changes'))->count())->toBe(3);
     });
 
     it('old kept rows do not block newer rows', function (): void {

@@ -167,3 +167,62 @@ it('a rebuild step and a second drainer exclude each other too', function (): vo
     expect($state->find('order')['rebuild_cursor'])->toBeNull()
         ->and($state->isReady('order'))->toBeTrue();
 });
+
+it('a reset committed between the read and the scan CAS makes the step a no-op', function (): void {
+    $other = cxSecond();
+    ConfigurableOrderSearch::$fields = [SearchField::key('signature')->normalizeUsing(new HookedNormalizer)];
+    $registry = new ModelSearchRegistry;
+    $registry->register(ConfigurableOrderSearch::class);
+    $definition = $registry->for(Order::class);
+    $state = new IndexState;
+    $state->recordInstall($definition);
+    // Past the sweep (which would hold the state row), in the middle of the scan.
+    DB::table(TableNames::forConnection()->state())->update(['rebuild_cursor' => '00000000-0000-0000-0000-000000000000']);
+    cxOrder(DB::connection(), 'CAS-1');
+    DB::table(TableNames::forConnection()->changes())->delete();
+    $stamp = null;
+
+    // An install (or a TRUNCATE) commits while the step is reindexing the page it scanned.
+    HookedNormalizer::$hook = static function () use ($other, &$stamp): void {
+        if ($stamp !== null) {
+            return;
+        }
+
+        $other->statement(sprintf('UPDATE %s SET rebuild_cursor = \'\', rebuild_started_at = clock_timestamp()', TableNames::forConnection()->state()));
+        $stamp = $other->table(TableNames::forConnection()->state())->value('rebuild_started_at');
+    };
+
+    $stats = cxIndexer(null, $registry)->drain(0);
+    HookedNormalizer::$hook = null;
+    $row = $state->find('order');
+
+    expect($stamp)->not->toBeNull()
+        ->and($row['rebuild_cursor'])->toBe('')
+        ->and($row['rebuild_started_at'])->toBe($stamp)
+        ->and($row['ready_at'])->toBeNull()
+        ->and($stats->rebuiltTypes)->toBe([]);
+
+    ConfigurableOrderSearch::reset();
+});
+
+it('a reset committed between the read and the sweep CAS keeps the reset', function (): void {
+    $other = cxSecond();
+    $state = new IndexState;
+    $state->recordInstall(app(ModelSearchRegistry::class)->for(Order::class));
+    $stamp = null;
+
+    DB::connection()->beforeExecuting(static function (string $query) use ($other, &$stamp): void {
+        if ($stamp === null && str_contains($query, '"sweep_cursor" = ?')) {
+            $other->statement(sprintf('UPDATE %s SET rebuild_cursor = \'\', rebuild_started_at = clock_timestamp()', TableNames::forConnection()->state()));
+            $stamp = $other->table(TableNames::forConnection()->state())->value('rebuild_started_at');
+        }
+    });
+
+    cxIndexer()->drain(0);
+    $row = $state->find('order');
+
+    expect($stamp)->not->toBeNull()
+        ->and($row['rebuild_started_at'])->toBe($stamp)
+        ->and($row['rebuild_cursor'])->toBe('')
+        ->and($row['sweep_cursor'])->toBeNull();
+});

@@ -37,6 +37,11 @@ use Throwable;
  * A release applies changes and rebuilds only for the types it owns (see {@see IndexState}). It may,
  * for types it does not own, only flag a rebuild or enqueue a row: the oversized-log switch, the
  * handoff of aged log rows and the retry of due failures. The owner does the work.
+ *
+ * Known cost of the age-based handoff: two live releases that read the same node type through
+ * different definitions for longer than `drain.foreign_grace_seconds` flag full rebuilds of each
+ * other's types. Nothing is lost (a rebuild recomputes everything), but the work is wasted; keep
+ * the window of two live releases shorter than the grace period.
  */
 final class SearchIndexer
 {
@@ -47,8 +52,11 @@ final class SearchIndexer
     /** @var array<string, string> */
     private array $fingerprints = [];
 
-    /** @var list<int> Log rows this drain has applied only in part (an unowned type also reads them) and must not read again. */
-    private array $skipIds = [];
+    /** Highest log row id this drain has read: kept rows lie below it and are not read again. */
+    private int $watermark = 0;
+
+    /** @var list<int> Rows left in the log by the last batch because their node was deferred; read again first. */
+    private array $deferredIds = [];
 
     /** @var array<string, true> Types whose rebuild step failed in this drain. */
     private array $skippedRebuilds = [];
@@ -78,7 +86,8 @@ final class SearchIndexer
             throw new DrainInsideTransaction('A drain must not run inside an open transaction: its advisory lock and its events would leak into the caller\'s transaction.');
         }
 
-        $this->skipIds = [];
+        $this->watermark = 0;
+        $this->deferredIds = [];
         $this->skippedRebuilds = [];
 
         $budget = $budgetMs ?? (int) config('model-search.drain.budget_ms', 50000);
@@ -196,7 +205,7 @@ final class SearchIndexer
             $foreignGrace = max(0, (int) config('model-search.drain.foreign_grace_seconds', 3600));
             $rows = $db->select(
                 sprintf(
-                    'SELECT "id", "node_type", "node_id", ("changed_at" < clock_timestamp() - make_interval(secs => ?::double precision)) AS "aged" FROM %1$s WHERE ("node_type" = ANY(?::text[]) OR ("node_type" = ANY(?::text[]) AND "changed_at" < clock_timestamp() - make_interval(secs => ?::double precision)) OR ("node_type" <> ALL(?::text[]) AND "changed_at" < clock_timestamp() - make_interval(secs => ?::double precision))) AND "id" <> ALL(?::bigint[]) ORDER BY "id" LIMIT %2$d',
+                    'SELECT "id", "node_type", "node_id", ("changed_at" < clock_timestamp() - make_interval(secs => ?::double precision)) AS "aged", "changed_at"::text AS "changed" FROM %1$s WHERE ("node_type" = ANY(?::text[]) OR ("node_type" = ANY(?::text[]) AND "changed_at" < clock_timestamp() - make_interval(secs => ?::double precision)) OR ("node_type" <> ALL(?::text[]) AND "changed_at" < clock_timestamp() - make_interval(secs => ?::double precision))) AND ("id" > ? OR "id" = ANY(?::bigint[])) ORDER BY "id" LIMIT %2$d',
                     $changes,
                     max(1, (int) config('model-search.drain.rows', 5000)),
                 ),
@@ -207,7 +216,8 @@ final class SearchIndexer
                     $foreignGrace,
                     Sql::arrayLiteral(array_map(strval(...), array_keys($known))),
                     max(0, (int) config('model-search.drain.unknown_grace_seconds', 3600)),
-                    Sql::arrayLiteral($this->skipIds),
+                    $this->watermark,
+                    Sql::arrayLiteral($this->deferredIds),
                 ],
             );
 
@@ -217,6 +227,8 @@ final class SearchIndexer
 
             [$read, $nodes] = $this->dedupe($rows);
             $readSet = array_flip($read);
+            $this->watermark = max($this->watermark, ...$read);
+            $this->deferredIds = [];
             $applicable = array_values(array_filter($nodes, static fn (array $node): bool => isset($readable[$node[0]]) || ! isset($foreign[$node[0]])));
 
             $batch->logBatches++;
@@ -248,13 +260,17 @@ final class SearchIndexer
                 $id = (int) $row->id;
                 $type = (string) $row->node_type;
 
-                if (! isset($readSet[$id]) || isset($deferred[$type."\0".$row->node_id])) {
+                if (! isset($readSet[$id])) {
+                    continue;
+                }
+
+                if (isset($deferred[$type."\0".$row->node_id])) {
+                    $this->deferredIds[] = $id;
+
                     continue;
                 }
 
                 if (isset($foreign[$type]) && ! $row->aged) {
-                    $this->skipIds[] = $id;
-
                     continue;
                 }
 
@@ -262,7 +278,7 @@ final class SearchIndexer
                     $batch->handedOffRows++;
 
                     foreach ($foreign[$type] as $alias) {
-                        $flag[$alias] = true;
+                        $flag[$alias] = max($flag[$alias] ?? '', (string) $row->changed);
                     }
                 }
 
@@ -270,7 +286,7 @@ final class SearchIndexer
             }
 
             if ($flag !== []) {
-                $batch->flaggedTypes = array_map(strval(...), array_keys($this->flagRebuilds($db, array_keys($flag))));
+                $batch->flaggedTypes = array_map(strval(...), array_keys($this->flagRebuilds($db, $flag)));
             }
 
             if ($consumed !== []) {
@@ -346,7 +362,9 @@ final class SearchIndexer
             $limit = max(1, (int) config('model-search.drain.rows', 5000));
             $batch->rebuildBatches++;
 
-            if ($cursor === '' && ! $this->sweep($db, $definition, $row['sweep_cursor'], $limit, $batch)) {
+            $startedAt = $row['rebuild_started_at'];
+
+            if ($cursor === '' && ! $this->sweep($db, $definition, $row['sweep_cursor'], $startedAt, $limit, $batch)) {
                 return true;
             }
 
@@ -357,8 +375,8 @@ final class SearchIndexer
 
             if (count($ids) < $limit) {
                 $done = $db->affectingStatement(
-                    sprintf('UPDATE %s SET "rebuild_cursor" = NULL, "rebuild_started_at" = NULL, "sweep_cursor" = NULL, "ready_at" = COALESCE("ready_at", clock_timestamp()) WHERE "subject_type" = ? AND "rebuild_cursor" = ?', $state),
-                    [$type, $cursor],
+                    sprintf('UPDATE %s SET "rebuild_cursor" = NULL, "rebuild_started_at" = NULL, "sweep_cursor" = NULL, "ready_at" = COALESCE("ready_at", clock_timestamp()) WHERE "subject_type" = ? AND "rebuild_cursor" = ? AND "rebuild_started_at" IS NOT DISTINCT FROM ?::timestamptz', $state),
+                    [$type, $cursor, $startedAt],
                 );
 
                 if ($done === 1) {
@@ -369,8 +387,8 @@ final class SearchIndexer
             }
 
             $db->affectingStatement(
-                sprintf('UPDATE %s SET "rebuild_cursor" = ? WHERE "subject_type" = ? AND "rebuild_cursor" = ?', $state),
-                [$ids[array_key_last($ids)], $type, $cursor],
+                sprintf('UPDATE %s SET "rebuild_cursor" = ? WHERE "subject_type" = ? AND "rebuild_cursor" = ? AND "rebuild_started_at" IS NOT DISTINCT FROM ?::timestamptz', $state),
+                [$ids[array_key_last($ids)], $type, $cursor, $startedAt],
             );
 
             return true;
@@ -405,13 +423,13 @@ final class SearchIndexer
      * One bounded step of the sweep that opens a rebuild: walks the type's entries by key from the
      * sweep cursor, `drain.rows` at a time, and removes the entries and key rows of roots that no
      * longer exist or are soft deleted (what a TRUNCATE leaves behind, since it logs nothing per
-     * row). The cursor is advanced by compare-and-swap, so a restart of the rebuild in the meantime
-     * wins. Key rows without an entry are not looked for here: entry and keys are written in one
+     * row). The cursor is advanced by compare-and-swap on the cursor AND the moment the rebuild started,
+     * so a restart of the rebuild in the meantime (every restart stamps a new moment) wins. Key rows without an entry are not looked for here: entry and keys are written in one
      * transaction, and the doctor checks for strays.
      *
      * @return bool True when the whole type was walked.
      */
-    private function sweep(Connection $db, CompiledDefinition $definition, ?string $cursor, int $limit, DrainStats $batch): bool
+    private function sweep(Connection $db, CompiledDefinition $definition, ?string $cursor, ?string $startedAt, int $limit, DrainStats $batch): bool
     {
         $model = new ($definition->modelClass);
         $soft = Sql::softDeleteColumn($model);
@@ -452,8 +470,8 @@ final class SearchIndexer
         $finished = count($page) < $limit;
         $next = $finished ? null : $page[count($page) - 1];
         $moved = $db->affectingStatement(
-            sprintf('UPDATE %s SET "sweep_cursor" = ? WHERE "subject_type" = ? AND "rebuild_cursor" = \'\' AND "sweep_cursor" IS NOT DISTINCT FROM ?', $this->names()->quoted($this->names()->state())),
-            [$next, $type, $cursor],
+            sprintf('UPDATE %s SET "sweep_cursor" = ? WHERE "subject_type" = ? AND "rebuild_cursor" = \'\' AND "rebuild_started_at" IS NOT DISTINCT FROM ?::timestamptz AND "sweep_cursor" IS NOT DISTINCT FROM ?', $this->names()->quoted($this->names()->state())),
+            [$next, $type, $startedAt, $cursor],
         );
 
         return $moved === 1 && $finished;
@@ -643,17 +661,22 @@ final class SearchIndexer
     }
 
     /**
-     * Asks the owner to rebuild types this release does not own: a flag only, and only when no rebuild
-     * is pending or running (the owner does the work).
+     * Asks the owner to rebuild types this release does not own. A flag only: it never rebuilds.
+     * A type with no rebuild pending is flagged. A rebuild that is already running is restarted
+     * only when it started before the handed-off change and has left the start, since it may
+     * have passed the root already; a rebuild at the start will read the change anyway.
      *
-     * @param  list<int|string>  $aliases
+     * @param  array<string, string>  $changedAt  Per type: the latest `changed_at` of the rows handed over.
      * @return array<string, true> The types that were flagged.
      */
-    private function flagRebuilds(Connection $db, array $aliases): array
+    private function flagRebuilds(Connection $db, array $changedAt): array
     {
         $rows = $db->select(
-            sprintf('UPDATE %s SET "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp(), "sweep_cursor" = NULL WHERE "subject_type" = ANY(?::text[]) AND "rebuild_cursor" IS NULL RETURNING "subject_type"', $this->names()->quoted($this->names()->state())),
-            [Sql::arrayLiteral(array_map(strval(...), $aliases))],
+            sprintf(
+                'UPDATE %s AS s SET "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp(), "sweep_cursor" = NULL FROM unnest(?::text[], ?::timestamptz[]) AS u("alias", "changed") WHERE s."subject_type" = u."alias" AND (s."rebuild_cursor" IS NULL OR (s."rebuild_cursor" <> \'\' AND (s."rebuild_started_at" IS NULL OR s."rebuild_started_at" < u."changed"))) RETURNING s."subject_type"',
+                $this->names()->quoted($this->names()->state()),
+            ),
+            [Sql::arrayLiteral(array_map(strval(...), array_keys($changedAt))), Sql::arrayLiteral(array_values($changedAt))],
         );
 
         $flagged = [];

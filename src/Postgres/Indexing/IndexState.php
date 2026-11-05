@@ -33,7 +33,8 @@ use Throwable;
  *
  * Flagging a rebuild (the drain's oversized-log switch and the handoff of aged log rows) and
  * re-queueing failed records (`PoisonRecords::requeueDue`) may act on types this release does not
- * own: they only set a flag or enqueue a row. Applying changes and rebuilding stay owner-only.
+ * own: they only set a flag or enqueue a row. (Two live releases with mixed readers for longer than
+ * `drain.foreign_grace_seconds` flag full rebuilds of each other's types: no data loss, wasted work.) Applying changes and rebuilding stay owner-only.
  *
  * `ready_at` is cached for a few seconds as a plain boolean; the cache is only a way to spare the
  * database on the hot path, never a source of truth.
