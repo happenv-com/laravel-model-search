@@ -26,7 +26,7 @@ use Illuminate\Database\Query\Builder;
  * @property string|null $customer_name
  * @property string $state
  */
-final class Order extends Model
+class Order extends Model
 {
     /** @use HasUuids<Order> */
     use HasUuids;

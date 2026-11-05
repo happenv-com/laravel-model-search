@@ -60,9 +60,19 @@ final class IdNarrowing
      */
     public static function narrow(Builder $tableQuery, array $ids, string $keyType): void
     {
-        $list = $tableQuery->getQuery()->newQuery()->fromRaw(self::unnest($keyType), [Sql::arrayLiteral($ids)])->select('search_ids.id');
+        $list = $tableQuery->getQuery()->newQuery()->fromRaw(self::unnest($keyType), [Sql::arrayLiteral($ids)])->select('search_ids.search_id');
         $alias = 'search_ids_'.count($tableQuery->getQuery()->joins ?? []);
-        $tableQuery->joinSub($list, $alias, $tableQuery->getModel()->getQualifiedKeyName(), '=', $alias.'.id');
+        $tableQuery->joinSub($list, $alias, $tableQuery->getModel()->getQualifiedKeyName(), '=', $alias.'.search_id');
+    }
+
+    /**
+     * Refuses a key type a list of keys cannot narrow by; called when a definition compiles.
+     *
+     * @throws InvalidSearchDefinition
+     */
+    public static function assertKeyType(string $keyType): void
+    {
+        self::unnest($keyType);
     }
 
     /**
@@ -71,13 +81,13 @@ final class IdNarrowing
     private static function unnest(string $keyType): string
     {
         return match ($keyType) {
-            'uuid' => 'unnest(?::uuid[]) AS "search_ids"("id")',
-            'int8' => 'unnest(?::int8[]) AS "search_ids"("id")',
-            'int4' => 'unnest(?::int4[]) AS "search_ids"("id")',
-            'int2' => 'unnest(?::int2[]) AS "search_ids"("id")',
-            'text' => 'unnest(?::text[]) AS "search_ids"("id")',
-            'varchar' => 'unnest(?::varchar[]) AS "search_ids"("id")',
-            'bpchar' => 'unnest(?::bpchar[]) AS "search_ids"("id")',
+            'uuid' => 'unnest(?::uuid[]) AS "search_ids"("search_id")',
+            'int8' => 'unnest(?::int8[]) AS "search_ids"("search_id")',
+            'int4' => 'unnest(?::int4[]) AS "search_ids"("search_id")',
+            'int2' => 'unnest(?::int2[]) AS "search_ids"("search_id")',
+            'text' => 'unnest(?::text[]) AS "search_ids"("search_id")',
+            'varchar' => 'unnest(?::varchar[]) AS "search_ids"("search_id")',
+            'bpchar' => 'unnest(?::bpchar[]) AS "search_ids"("search_id")',
             default => throw new InvalidSearchDefinition(sprintf('Tables keyed by "%s" cannot be narrowed to a list of keys.', $keyType)),
         };
     }

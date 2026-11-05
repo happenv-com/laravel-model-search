@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Happenv\ModelSearch\Drivers\DatabaseDriver;
 use Happenv\ModelSearch\Normalization\KeyNormalizer;
 use Happenv\ModelSearch\Normalization\NameNormalizer;
 use Happenv\ModelSearch\Normalization\Normalizer;
@@ -15,6 +16,8 @@ dataset('phrase carrying parameters', [
     [QueryVariants::class, 'keysFor', 'q'],
     [PhraseShape::class, 'isIdentifierLike', 'q'],
     [PhraseShape::class, 'words', 'q'],
+    [DatabaseDriver::class, 'keyBranch', 'phrase'],
+    [DatabaseDriver::class, 'wordSets', 'phrase'],
     [Normalizer::class, 'normalize', 'value'],
     [KeyNormalizer::class, 'normalize', 'value'],
     [KeyNormalizer::class, 'transliterated', 'value'],

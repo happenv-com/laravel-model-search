@@ -14,16 +14,20 @@ use Happenv\ModelSearch\Exceptions\ExtensionWithoutDefinition;
 use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\InvalidStageConstraint;
 use Happenv\ModelSearch\Exceptions\UnknownDefinition;
+use Happenv\ModelSearch\Exceptions\UnsupportedRelation;
 use Happenv\ModelSearch\Exceptions\UnsupportedStages;
 use Happenv\ModelSearch\Facades\ModelSearch as ModelSearchFacade;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Happenv\ModelSearch\Tests\Fixtures\Builders\OrderBuilder;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Customer;
+use Happenv\ModelSearch\Tests\Fixtures\Models\DatedRecord;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Invoice;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Parcel;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Product;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\DatedRecordSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\HasManyViaOrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\MarketOrderSearchExtension;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\StageProbeSearch;
@@ -310,3 +314,17 @@ it('rejects a stage that binds an object', function (): void {
         ConfigurableOrderSearch::reset();
     }
 })->throws(InvalidStageConstraint::class);
+
+it('refuses a via field whose relation cannot be served', function (): void {
+    $registry = new ModelSearchRegistry;
+    $registry->register(HasManyViaOrderSearch::class);
+
+    expect(fn () => $registry->for(Order::class))->toThrow(UnsupportedRelation::class, 'BelongsTo');
+});
+
+it('refuses a key type a list of keys cannot narrow by', function (): void {
+    $registry = new ModelSearchRegistry;
+    $registry->register(DatedRecordSearch::class);
+
+    expect(fn () => $registry->for(DatedRecord::class))->toThrow(InvalidSearchDefinition::class, 'date');
+});

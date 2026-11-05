@@ -30,4 +30,14 @@ final class Invoice extends Model
     {
         return $this->belongsTo(Order::class);
     }
+
+    /**
+     * Belongs to the order whose external number is this invoice's external reference.
+     *
+     * @return BelongsTo<Order, $this>
+     */
+    public function orderByExternal(): BelongsTo
+    {
+        return $this->belongsTo(Order::class, 'external_reference', 'external_number');
+    }
 }

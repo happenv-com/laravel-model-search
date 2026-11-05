@@ -112,6 +112,9 @@ final class SearchQuery
 
     /**
      * Searches every record of the model, for work that has no viewer. The reason is the audit trail.
+     *
+     * Parent scopes given to an earlier `within()` are dropped: a `via` field never follows a parent
+     * without a scope of its own, so an unscoped search does not follow `via` fields at all.
      */
     public function withoutScope(string $reason): self
     {
@@ -309,7 +312,8 @@ final class SearchQuery
     }
 
     /**
-     * The scope of a parent model for `via` fields; null keeps those fields closed.
+     * The scope of a parent model for `via` fields, matched by class or by a base class it was given
+     * for; null keeps those fields closed.
      *
      * @internal
      *
@@ -317,7 +321,17 @@ final class SearchQuery
      */
     public function parentScope(string $parentClass): ?HostQuery
     {
-        return $this->parents[$parentClass] ?? null;
+        if (isset($this->parents[$parentClass])) {
+            return $this->parents[$parentClass];
+        }
+
+        foreach ($this->parents as $scopedClass => $scope) {
+            if (is_a($parentClass, $scopedClass, true)) {
+                return $scope;
+            }
+        }
+
+        return null;
     }
 
     /**

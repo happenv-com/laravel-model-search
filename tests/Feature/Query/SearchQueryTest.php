@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Definition\SearchField;
+use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\PartitionMissing;
 use Happenv\ModelSearch\Exceptions\SearchFailed;
 use Happenv\ModelSearch\Exceptions\SearchScopeMissing;
@@ -19,10 +20,12 @@ use Happenv\ModelSearch\Tests\Fixtures\Models\Customer;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Invoice;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Product;
+use Happenv\ModelSearch\Tests\Fixtures\Models\SubOrder;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\CustomerSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\InvoiceSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\OwnerKeyInvoiceSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ProductSearch;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Foundation\Auth\User;
@@ -294,7 +297,7 @@ describe('matching', function (): void {
             ->and(signaturesOf(orderSearch('日本語')->similar()))->toBe([]);
     });
 
-    it('does not serve via fields, which need a scope of their own', function (): void {
+    it('does not serve via fields without a scope for the parent', function (): void {
         $order = Order::create(['signature' => 'ORD-1']);
         Invoice::create(['number' => 'FV-1', 'order_id' => $order->id]);
 
@@ -500,6 +503,16 @@ describe('stages', function (): void {
 
         expect(signaturesOf($results))->toBe(['ABC'])
             ->and($results->stage)->toBe('open');
+    });
+
+    it('decides whether stage zero has non-exact hits after each record keeps only its best hit', function (): void {
+        Order::create(['signature' => 'ABC', 'external_number' => 'ABC-1', 'state' => 'unshipped']);
+
+        $results = orderSearch('ABC')->get();
+
+        expect(signaturesOf($results))->toBe(['ABC'])
+            ->and($results->stage)->toBe('all')
+            ->and(iterator_to_array($results)[0]->match->stage)->toBe('open');
     });
 
     it('reports no stage for a definition without stages', function (): void {
@@ -889,6 +902,65 @@ describe('via', function (): void {
         $query = InvoiceSearch::query('ORD-1')->within(Invoice::query(), [Order::class => Order::query()])->withoutScope('system job');
 
         expect(iterator_to_array($query->get()))->toBe([]);
+    });
+});
+
+describe('via parents', function (): void {
+    function useRegistry(string ...$definitions): void
+    {
+        $registry = new ModelSearchRegistry;
+        foreach ($definitions as $definition) {
+            $registry->register($definition);
+        }
+        app()->instance(ModelSearchRegistry::class, $registry);
+    }
+
+    it('honours the owner key of the relation', function (): void {
+        useRegistry(OwnerKeyInvoiceSearch::class, OrderSearch::class);
+        $inScope = Order::create(['signature' => 'ORD-B', 'state' => 'unshipped']);
+        $real = Order::create(['signature' => 'ORD-A', 'external_number' => $inScope->id, 'state' => 'shipped']);
+        Invoice::create(['number' => 'FV-1', 'external_reference' => $inScope->id]);
+        $scope = Order::query()->where('state', 'unshipped');
+
+        $wrongParent = OwnerKeyInvoiceSearch::query('ORD-B')->within(Invoice::query(), [Order::class => $scope])->get();
+        $realParent = OwnerKeyInvoiceSearch::query('ORD-A')->within(Invoice::query(), [Order::class => Order::query()])->get();
+
+        expect($real->id)->not->toBe($inScope->id)
+            ->and(iterator_to_array($wrongParent))->toBe([])
+            ->and(iterator_to_array($realParent))->toHaveCount(1);
+    });
+
+    it('takes at most 50 parents per via path', function (): void {
+        foreach (range(1, 60) as $i) {
+            $order = Order::create(['signature' => sprintf('ORD-%02d', $i)]);
+            Invoice::create(['number' => 'FV-'.$i, 'order_id' => $order->id]);
+        }
+
+        $results = invoiceSearch('ORD', Order::query())->limit(100)->get();
+
+        expect(iterator_to_array($results))->toHaveCount(50);
+    });
+
+    it('fails loudly when the parent has no definition', function (): void {
+        useRegistry(InvoiceSearch::class);
+
+        expect(fn () => InvoiceSearch::query('ORD-1')->within(Invoice::query(), [Order::class => Order::query()])->get())->toThrow(InvalidSearchDefinition::class);
+    });
+
+    it('matches a scope given for a base class to its subclass', function (): void {
+        $query = InvoiceSearch::query('x')->within(Invoice::query(), [Order::class => Order::query()]);
+
+        expect($query->parentScope(Order::class))->not->toBeNull()
+            ->and($query->parentScope(SubOrder::class))->not->toBeNull()
+            ->and($query->parentScope(Customer::class))->toBeNull();
+    });
+
+    it('names its id column so it never shadows a real id', function (): void {
+        Order::create(['signature' => 'ABCD-1']);
+
+        $sql = orderSearch('ABCD')->apply(Order::query())->toSql();
+
+        expect($sql)->toContain('"search_ids_0"."search_id"')->and($sql)->not->toContain('"search_ids_0"."id"');
     });
 });
 

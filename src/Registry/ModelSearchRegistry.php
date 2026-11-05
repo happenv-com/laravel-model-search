@@ -15,6 +15,7 @@ use Happenv\ModelSearch\Definition\ModelSearchExtension;
 use Happenv\ModelSearch\Definition\SearchField;
 use Happenv\ModelSearch\Definition\SearchStage;
 use Happenv\ModelSearch\Definition\StageConstraintInspector;
+use Happenv\ModelSearch\Drivers\IdNarrowing;
 use Happenv\ModelSearch\Exceptions\DuplicateDefinition;
 use Happenv\ModelSearch\Exceptions\DuplicateKind;
 use Happenv\ModelSearch\Exceptions\ExtensionWithoutDefinition;
@@ -134,6 +135,9 @@ final class ModelSearchRegistry
     {
         $model = new $modelClass;
 
+        $keySqlType = new ColumnTypes()->of($model, $model->getTable(), $model->getKeyName());
+        IdNarrowing::assertKeyType($keySqlType);
+
         $fields = $this->compilePaths($modelClass, $this->compileFields($modelClass, $definition), $definition->withScopes());
         $stages = $this->compileStages($modelClass, $definition);
 
@@ -148,7 +152,7 @@ final class ModelSearchRegistry
             fallback: $definition->fallback(),
             version: $definition->version(),
             withScopes: $definition->withScopes(),
-            keySqlType: new ColumnTypes()->of($model, $model->getTable(), $model->getKeyName()),
+            keySqlType: $keySqlType,
         );
     }
 

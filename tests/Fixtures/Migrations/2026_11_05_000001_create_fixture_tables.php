@@ -77,6 +77,11 @@ return new class extends Migration
             $table->timestampsTz(6);
         });
 
+        Schema::create('dated_records', function (Blueprint $table): void {
+            $table->date('day')->primary();
+            $table->text('code')->nullable();
+        });
+
         Schema::create('tags', function (Blueprint $table): void {
             $table->id();
             $table->text('name')->nullable();

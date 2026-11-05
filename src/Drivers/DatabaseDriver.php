@@ -13,6 +13,7 @@ use Happenv\ModelSearch\Definition\CompiledField;
 use Happenv\ModelSearch\Definition\FieldType;
 use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Definition\SearchStage;
+use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\SearchFailed;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Exceptions\UnknownDefinition;
@@ -47,8 +48,9 @@ use Illuminate\Support\Str;
  *   looked up in the form it was typed and in the viewer's locale variants;
  * - a custom normalizer cannot run in SQL, so a field that has one is compared case-insensitively
  *   against the normalizer's output and must store that form;
- * - `via` fields are not served: a related record needs a scope of its own, which a single
- *   `within()` cannot carry, so the driver stays closed rather than guess;
+ * - `via` fields follow a BelongsTo parent only through the parent's own scope (`within($host, via:
+ *   [...])`), at most {@see self::VIA_PARENT_LIMIT} parents per field; without that scope they find
+ *   nothing, and a parent model without a definition is an error;
  * - cost depends on the indexes of the application, every search scans.
  *
  * Statements are single SQL statements whose search phrase is a bound parameter; on PostgreSQL
@@ -66,6 +68,9 @@ SQL;
     private const string NAME_FORM = <<<'SQL'
 ' ' || regexp_replace(regexp_replace(c."value", '[''’`]+', '', 'g'), '[\s\-_.\/#+,:;]+', ' ', 'g')
 SQL;
+
+    /** The most parents in scope a `via` field follows per search. */
+    public const int VIA_PARENT_LIMIT = 50;
 
     private const string POSTGRES_TIMEOUT_STATE = '57014';
 
@@ -245,7 +250,13 @@ SQL;
         try {
             $parentDefinition = resolve(ModelSearchRegistry::class)->for($parentClass);
         } catch (UnknownDefinition) {
-            return null;
+            throw new InvalidSearchDefinition(sprintf(
+                'The via field "%s" of %s follows %s, whose scope was given, but %s has no search definition.',
+                $field->path,
+                $this->definition->modelClass,
+                $parentClass,
+                $parentClass,
+            ));
         }
 
         $parentHits = new self($parentDefinition)->hits($probe->forKinds($field->via), $forTable, false);
@@ -259,18 +270,30 @@ SQL;
             array_filter($parentDefinition->fields, static fn (CompiledField $parentField): bool => $parentField->reveal instanceof Closure),
         ));
         $scope = $parentScope->sql();
+        $parent = new ($parentDefinition->modelClass);
         $softDelete = Sql::softDeleteColumn($child);
+        $key = Sql::ident(HostQuery::KEY_ALIAS);
+
+        // The best parent hits inside the parent's scope, one per parent, at most VIA_PARENT_LIMIT.
+        $parents = sprintf(
+            'SELECT d.* FROM (SELECT DISTINCT ON (p."root_key") p.* FROM (%1$s) AS p JOIN (%2$s) AS "parent_host" ON "parent_host".%3$s = p."root_key" ORDER BY p."root_key", p."level", p."weight" DESC) AS d ORDER BY d."level", d."weight" DESC, d."root_id" LIMIT %4$d',
+            $parentHits->sql,
+            $scope['sql'],
+            $key,
+            self::VIA_PARENT_LIMIT,
+        );
 
         return new Fragment(
             sprintf(
-                'SELECT c.%1$s::text AS "root_id", CAST(? AS text) AS "kind", (p."level" + %2$d) AS "level", CAST(? AS integer) AS "weight", CASE WHEN p."kind" = ANY(?::text[]) THEN NULL ELSE p."value" END AS "value", CAST(? AS text) AS "via" FROM (%3$s) AS p JOIN (%4$s) AS "parent_host" ON "parent_host".%5$s = p."root_key" JOIN %6$s AS c ON c.%7$s = p."root_key"%8$s',
+                'SELECT c.%1$s::text AS "root_id", CAST(? AS text) AS "kind", (b."level" + %2$d) AS "level", CAST(? AS integer) AS "weight", CASE WHEN b."kind" = ANY(?::text[]) THEN NULL ELSE b."value" END AS "value", CAST(? AS text) AS "via" FROM (%3$s) AS b JOIN %4$s AS pt ON pt.%5$s = b."root_key" JOIN %6$s AS c ON c.%7$s = pt.%8$s%9$s',
                 Sql::ident($child->getKeyName()),
                 Hit::VIA_OFFSET,
-                $parentHits->sql,
-                $scope['sql'],
-                Sql::ident(HostQuery::KEY_ALIAS),
+                $parents,
+                Sql::table($parent),
+                Sql::ident($parent->getKeyName()),
                 Sql::table($child),
                 Sql::ident($relation->getForeignKeyName()),
+                Sql::ident($relation->getOwnerKeyName()),
                 $softDelete === null ? '' : ' AND c.'.Sql::ident($softDelete).' IS NULL',
             ),
             [$field->kind, $field->weight, Sql::arrayLiteral($revealing), $field->kind, ...$parentHits->bindings, ...$scope['bindings']],
@@ -322,7 +345,7 @@ SQL;
     /**
      * @param  list<Mode>  $modes
      */
-    private function keyBranch(CompiledField $field, array $modes, string $phrase, ?string $locale, bool $forTable): ?Fragment
+    private function keyBranch(CompiledField $field, array $modes, #[\SensitiveParameter] string $phrase, ?string $locale, bool $forTable): ?Fragment
     {
         $custom = $field->normalizer?->normalize($phrase);
         $variants = $field->normalizer instanceof Normalizer
@@ -372,7 +395,7 @@ SQL;
      *
      * @return list<list<string>>
      */
-    private function wordSets(string $phrase, ?string $locale, int $minLength): array
+    private function wordSets(#[\SensitiveParameter] string $phrase, ?string $locale, int $minLength): array
     {
         $typed = preg_split('/[\s\-_.\/#+,:;]+/u', str_replace(["'", '’', '`'], '', mb_strtolower(trim($phrase))), -1, PREG_SPLIT_NO_EMPTY) ?: [];
         $sets = [$typed];
@@ -489,7 +512,7 @@ SQL;
 
         return new Fragment(
             sprintf(
-                'SELECT ranked."root_id", ranked."kind", ranked."level", ranked."weight", ranked."value", ranked."via", ranked."in_stage", ranked."has_non_exact" FROM (SELECT DISTINCT ON (h."root_id") h."root_id", h."kind", h."level", h."weight", h."value", h."via", %1$s AS "sort_at", %2$s AS "in_stage", max(CASE WHEN h."level" %% %10$d > 0 THEN 1 ELSE 0 END) OVER () AS "has_non_exact" FROM (%3$s) AS h JOIN (%4$s) AS "host" ON "host".%5$s = h."root_key" JOIN %6$s AS r ON r.%7$s = h."root_key"%8$s ORDER BY h."root_id", h."level", h."weight" DESC, h."kind") AS ranked ORDER BY ranked."level", ranked."weight" DESC, ranked."sort_at" DESC NULLS LAST, ranked."root_id" LIMIT %9$d',
+                'SELECT ranked."root_id", ranked."kind", ranked."level", ranked."weight", ranked."value", ranked."via", ranked."in_stage", max(CASE WHEN ranked."level" %% %10$d > 0 THEN 1 ELSE 0 END) OVER () AS "has_non_exact" FROM (SELECT DISTINCT ON (h."root_id") h."root_id", h."kind", h."level", h."weight", h."value", h."via", %1$s AS "sort_at", %2$s AS "in_stage" FROM (%3$s) AS h JOIN (%4$s) AS "host" ON "host".%5$s = h."root_key" JOIN %6$s AS r ON r.%7$s = h."root_key"%8$s ORDER BY h."root_id", h."level", h."weight" DESC, h."kind") AS ranked ORDER BY ranked."level", ranked."weight" DESC, ranked."sort_at" DESC NULLS LAST, ranked."root_id" LIMIT %9$d',
                 $sortAt,
                 $inStage->sql,
                 $hits->sql,

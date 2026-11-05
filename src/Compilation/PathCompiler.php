@@ -155,7 +155,16 @@ final class PathCompiler
      */
     public function assertRelation(string $modelClass, string $name): void
     {
-        $this->relationOf(new $modelClass, $name);
+        $relation = $this->relationOf(new $modelClass, $name);
+
+        if (! $relation instanceof BelongsTo) {
+            throw new UnsupportedRelation(sprintf(
+                'The via field "%s" of %s follows a %s, but only a BelongsTo can be served (the record holds the key of its parent). Declare the field on the model that holds the foreign key, or index the value with a key field on a path.',
+                $name,
+                $modelClass,
+                class_basename($relation),
+            ));
+        }
     }
 
     /**
