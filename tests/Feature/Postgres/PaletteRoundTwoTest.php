@@ -207,21 +207,23 @@ describe('the decision', function (): void {
         $sql = RoundTwo::sql(rtTarget(), ['order' => RoundTwoPhase::StageZeroThenAll])['sql'];
 
         expect($sql)->toContain('s0t0 AS MATERIALIZED (')
-            ->and($sql)->toContain('NOT EXISTS (SELECT 1 FROM s0t0 x WHERE x.level % 10 > 0 AND x.s0)')
+            ->and($sql)->toContain('NOT EXISTS (SELECT 1 FROM s0t0 x WHERE x.level % 10 > 0 AND x.s0 AND NOT EXISTS (SELECT 1 FROM s0t0 y WHERE y.subject_id = x.subject_id AND y.level % 10 = 0))')
             ->and(substr_count($sql, 'AND k.stage < 32767'))->toBeGreaterThan(0);
     });
 
-    it('merges what round two found with what round one found', function (): void {
-        $row = static fn (string $id, int $level): CandidateRow => new CandidateRow($id, 'signature', $level, null, null, false);
-        $first = new TypeRound([$row('a', 0), $row('b', 1)], 2, 0, false, false, false, false, 3);
-        $second = new TypeRound([$row('b', 0), $row('c', 2)], 2, 0, false, true, false, false, 3);
+    it('merges what round two found with what round one found, in the ranking of the palette', function (): void {
+        $row = static fn (string $id, int $level, int $weight = 0, float $similarity = 0.0, ?float $sortAt = null): CandidateRow => new CandidateRow($id, 'signature', $level, null, null, false, [], $weight, $similarity, $sortAt);
+        $first = new TypeRound([$row('a', 0, 5), $row('b', 1), $row('d', 2, 9)], 3, 0, false, false, false, false, 5);
+        $second = new TypeRound([$row('b', 0, 3), $row('c', 2, 1), $row('e', 2, 1, 0.0, 10.0), $row('f', 2, 1, 0.5)], 4, 0, false, true, false, false, 5);
 
         $merged = $second->mergedWith($first);
 
-        expect(array_map(static fn ($r): string => $r->subjectId.$r->level, $merged->rows))->toBe(['b0', 'a0', 'c2'])
+        // Level first, then the weight of the field (a round-one record outranks round two's of the same level), then
+        // similarity, the newest sort moment, and the key.
+        expect(array_map(static fn ($r): string => $r->subjectId, $merged->rows))->toBe(['a', 'b', 'd', 'f', 'e'])
             ->and($merged->anyFull)->toBeTrue()
-            ->and($second->mergedWith(new TypeRound([], 0, 0, false, false, false, false, 3))->rows)->toHaveCount(2)
-            ->and((new TypeRound([], 0, 0, false, false, false, false, 3))->mergedWith($first)->rows)->toHaveCount(2);
+            ->and($second->mergedWith(new TypeRound([], 0, 0, false, false, false, false, 3))->rows)->toHaveCount(4)
+            ->and((new TypeRound([], 0, 0, false, false, false, false, 3))->mergedWith($first)->rows)->toHaveCount(3);
     });
 
     it('limits every scoped branch to a few keys per record of the limit', function (): void {

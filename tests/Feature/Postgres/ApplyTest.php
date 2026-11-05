@@ -219,7 +219,18 @@ describe('via overflow', function (): void {
         foreach (['postgres', 'database'] as $driver) {
             config(['model-search.driver' => $driver]);
 
-            expect(fn () => apInvoices('ORDS', Order::query()), $driver)->toThrow(SearchTooBroad::class)
+            $fifty_one = Order::query()->where('signature', '<=', 'ORDS-51');
+            $refusal = null;
+
+            try {
+                apInvoices('ORDS', $fifty_one);
+            } catch (SearchTooBroad $exception) {
+                $refusal = $exception->getMessage();
+            }
+
+            expect(fn () => apInvoices('ORDS', Order::query()), $driver)->toThrow(SearchTooBroad::class, 'parent records in scope')
+                ->and($refusal, $driver)->toContain('50 parent records')
+                ->and($refusal, $driver)->not->toContain('ORDS')
                 ->and(apInvoices('ORDS', $fifty)->count(), $driver)->toBe(50);
         }
     });

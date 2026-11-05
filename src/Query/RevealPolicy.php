@@ -35,6 +35,20 @@ final readonly class RevealPolicy
             ->withAlternatives($alternatives);
     }
 
+    /**
+     * The value of a match that has no model to ask (a raw candidate): shown only for a field WITHOUT a
+     * `revealUsing()` rule, since a rule needs the model and the viewer. The name words answer for the
+     * name fields that match by prefix.
+     */
+    public static function withoutModel(CompiledDefinition $definition, string $kind, ?string $value): ?string
+    {
+        $fields = $kind === SearchField::RESERVED_KIND
+            ? array_filter($definition->fields, static fn (CompiledField $field): bool => $field->type === FieldType::Name && in_array(Mode::Prefix, $field->modes, true))
+            : array_filter($definition->fields, static fn (CompiledField $field): bool => $field->kind === $kind);
+
+        return $fields !== [] && array_all($fields, static fn (CompiledField $field): bool => ! $field->reveal instanceof \Closure) ? $value : null;
+    }
+
     private function allows(string $kind, Model $model, mixed $viewer): bool
     {
         if ($kind === SearchField::RESERVED_KIND) {

@@ -248,6 +248,8 @@ final class SearchQuery
 
     /**
      * Raw candidates: no scope, no authorization, no hydration. Only available after withoutScope().
+     * A scope given with `within()` applies to one branch only, the `exactOnSource` one, which reads
+     * the source table through it; every other candidate comes from the index unauthorized.
      *
      *
      * @return Collection<int, array{type: string, id: string, mode: Mode, kind: string, value: string|null, stage: string|null}>

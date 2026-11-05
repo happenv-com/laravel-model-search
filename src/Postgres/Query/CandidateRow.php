@@ -25,7 +25,31 @@ final readonly class CandidateRow
         public ?string $via,
         public bool $inStage,
         public array $alternatives = [],
+        public int $weight = 0,
+        public float $similarity = 0.0,
+        public ?float $sortAt = null,
     ) {}
+
+    /**
+     * Whether this row ranks before the other by the ranking of the palette: level, then the weight of
+     * the field, the similarity, the newest sort moment (none last); the key is the last word.
+     * Negative: before. Zero: the same place (the key aside).
+     */
+    public function compareRank(self $other): int
+    {
+        return [$this->level, $other->weight, $other->similarity] <=> [$other->level, $this->weight, $this->similarity]
+            ?: $this->compareSortMoment($this->sortAt, $other->sortAt);
+    }
+
+    private function compareSortMoment(?float $a, ?float $b): int
+    {
+        return match (true) {
+            $a === $b => 0,
+            $a === null => 1,
+            $b === null => -1,
+            default => $b <=> $a,
+        };
+    }
 
     public function mode(): Mode
     {

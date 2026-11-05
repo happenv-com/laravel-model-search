@@ -53,6 +53,14 @@ final class IdNarrowing
     }
 
     /**
+     * The refusal for a `via` path that found more parents in scope than it follows: following only some would leave records out.
+     */
+    public static function tooManyParents(): SearchTooBroad
+    {
+        return new SearchTooBroad(sprintf('The search matches more than %d parent records in scope; ask for a longer phrase.', DatabaseDriver::VIA_PARENT_LIMIT));
+    }
+
+    /**
      * The refusal for a lookup that reached the cap. It never carries the phrase.
      */
     public static function tooBroad(): SearchTooBroad

@@ -38,7 +38,8 @@ final readonly class TypeRound
 
     /**
      * What a later round found, completed with what an earlier one did: a record is kept once, in its
-     * best (lowest) level, the later round first on ties; the best `limit` are kept, ordered by level.
+     * best rank, the later round first on ties; the best `limit` are kept, in the ranking of the palette
+     * (level, weight, similarity, sort moment, key).
      * The counts and flags are those of the later round.
      */
     public function mergedWith(self $earlier): self
@@ -46,13 +47,13 @@ final readonly class TypeRound
         $best = [];
 
         foreach ([...$this->rows, ...$earlier->rows] as $row) {
-            if (! isset($best[$row->subjectId]) || $row->level < $best[$row->subjectId]->level) {
+            if (! isset($best[$row->subjectId]) || $row->compareRank($best[$row->subjectId]) < 0) {
                 $best[$row->subjectId] = $row;
             }
         }
 
         $rows = array_values($best);
-        usort($rows, static fn (CandidateRow $a, CandidateRow $b): int => $a->level <=> $b->level);
+        usort($rows, static fn (CandidateRow $a, CandidateRow $b): int => $a->compareRank($b) ?: strcmp($a->subjectId, $b->subjectId));
 
         return new self(array_slice($rows, 0, $this->limit), max($this->passed, count($rows)), $this->nonExactInStageZero, $this->stageZeroFull, $this->anyFull, $this->allStagesFull, $this->viaPoolFull, $this->limit);
     }

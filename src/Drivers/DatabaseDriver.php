@@ -152,7 +152,7 @@ SQL;
 
             // The marker row (no key): a `via` path found more parents than it follows, so the list would leave records out.
             if (in_array('', $ids, true)) {
-                throw IdNarrowing::tooBroad();
+                throw IdNarrowing::tooManyParents();
             }
 
             IdNarrowing::assertWithinCap($ids);
@@ -183,7 +183,7 @@ SQL;
             'id' => $hit->rootId,
             'mode' => $hit->mode(),
             'kind' => $hit->kind,
-            'value' => $hit->value,
+            'value' => RevealPolicy::withoutModel($this->definition, $hit->kind, $hit->value),
             'stage' => $this->stageOf($hit, $stage),
         ], $rows));
     }

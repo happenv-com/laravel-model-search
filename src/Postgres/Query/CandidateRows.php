@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Postgres\Query;
 
-use Closure;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\CompiledField;
 use Happenv\ModelSearch\Definition\FieldType;
@@ -13,6 +12,7 @@ use Happenv\ModelSearch\Definition\SearchField;
 use Happenv\ModelSearch\Definition\SearchStage;
 use Happenv\ModelSearch\Drivers\Fragment;
 use Happenv\ModelSearch\Drivers\Hit;
+use Happenv\ModelSearch\Query\RevealPolicy;
 use Happenv\ModelSearch\Query\SearchQuery;
 use Illuminate\Support\Collection;
 
@@ -22,8 +22,7 @@ use Illuminate\Support\Collection;
  * The branches of {@see CandidateBranches} with no host join, no scope, no second round and no
  * hydration: one row per record and matching field (the best mode of it), at most `pool` of them, the
  * best mode first. Nothing here is authorized, so a value is returned only for a field that has no
- * `revealUsing()` rule (there is no model to hand to the rule); the name words answer for all the
- * name fields that match by prefix.
+ * `revealUsing()` rule ({@see RevealPolicy::withoutModel()}).
  *
  * @internal
  */
@@ -72,12 +71,10 @@ final class CandidateRows
             $subject = is_scalar($columns['subject_id'] ?? null) ? (string) $columns['subject_id'] : '';
             $inStage = in_array($columns['s0'] ?? null, [true, 't', 1, '1'], true);
 
-            if ($kind === SearchField::RESERVED_KIND) {
-                $hidden = array_filter($definition->fields, static fn (CompiledField $field): bool => $field->type === FieldType::Name && in_array(Mode::Prefix, $field->modes, true) && $field->reveal instanceof Closure) !== [];
-                $kind = $named instanceof CompiledField ? $named->kind : $kind;
-            } else {
-                $field = array_find($definition->fields, static fn (CompiledField $field): bool => $field->kind === $kind);
-                $hidden = $field instanceof CompiledField && $field->reveal instanceof Closure;
+            $value = RevealPolicy::withoutModel($definition, $kind, $value);
+
+            if ($kind === SearchField::RESERVED_KIND && $named instanceof CompiledField) {
+                $kind = $named->kind;
             }
 
             $candidates->push([
@@ -85,7 +82,7 @@ final class CandidateRows
                 'id' => $subject,
                 'mode' => Mode::fromRank($level % Hit::VIA_OFFSET),
                 'kind' => $kind,
-                'value' => $hidden ? null : $value,
+                'value' => $value,
                 'stage' => $stage instanceof SearchStage ? ($inStage ? $stage->key : SearchStage::ALL) : null,
             ]);
         }
