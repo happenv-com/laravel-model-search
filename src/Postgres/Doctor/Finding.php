@@ -9,8 +9,6 @@ namespace Happenv\ModelSearch\Postgres\Doctor;
  *
  * The message names types, tables, indexes and settings and carries counts; it never carries a
  * phrase or a record's value.
- *
- * @internal
  */
 final readonly class Finding
 {

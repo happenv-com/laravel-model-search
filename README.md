@@ -15,6 +15,7 @@ You describe what is searchable on a model (identifiers, names, related records)
 - The role that runs `php artisan model-search:sync` (and `migrate`, which runs it) must **own** the watched tables and the package tables, or be a member of their owner.
 - The change-capture triggers are `SECURITY INVOKER`: every role that writes to a watched table needs `INSERT` on the package's changes table, and `UPDATE` on its state table to `TRUNCATE` a watched table. Grant these to your application's writing role.
 - Run `model-search:sync` on a **direct** connection, not a transaction-pooled one (PgBouncer in transaction mode): it holds a session advisory lock for the whole run.
+- A downgrade refusal from `model-search:sync` (an older release running it) only warns and exits 0; any other refusal exits non-zero.
 - Searches disable parallel query workers for their own transaction (`max_parallel_workers_per_gather = 0`), because many concurrent sessions each starting workers exhaust `/dev/shm`. Give the container a reasonably sized `/dev/shm` anyway if you run many sessions.
 - Under read/write splitting a search runs on the **primary** (it shares your write connection so that it sees uncommitted rows of the current transaction).
 
@@ -319,7 +320,7 @@ Sync, drain and doctor run on the **default connection**. A host with several da
 
 ## Public API
 
-Everything marked `@internal` (the compiler, the SQL builders, the drivers, the schema and indexing helpers, the normalization helpers) may change in any 0.x release. That includes `DriverManager::extend()` and the `Driver` interface: a custom driver needs internal accessors of `SearchQuery`. Public: the definition classes, the registry and its facade (`models()` among them), `SearchIndexer::hasDueFailures()` (a parked failure is due for its automatic retry; one `EXISTS`, with no compilation, to tell whether an otherwise idle drain has work; like `lag()` it needs the package's tables), `SearchQuery`, the results, the exceptions, the events, the contracts, the commands, the jobs, `Normalizer`, `SearchIndexer`, `IndexState` and `DrainStats`. Every exception implements `Happenv\ModelSearch\Exceptions\ModelSearchException`; `UnsupportedQuery` (a query nothing can answer) is a runtime refusal, not a definition error.
+Everything marked `@internal` (the compiler, the SQL builders, the drivers, the schema and indexing helpers, the normalization helpers) may change in any 0.x release. That includes `DriverManager::extend()` and the `Driver` interface: a custom driver needs internal accessors of `SearchQuery`. Public: the definition classes, the registry and its facade (`models()` among them), `SearchIndexer::hasDueFailures()` (a parked failure is due for its automatic retry; one `EXISTS`, with no compilation, to tell whether an otherwise idle drain has work; like `lag()` it needs the package's tables), `SearchQuery`, the results, the exceptions, the events, the contracts, the commands, the jobs, `Normalizer`, `SearchIndexer`, `IndexState`, `DrainStats`, `Doctor` (its `inspect()` only) and `Finding`. Every exception implements `Happenv\ModelSearch\Exceptions\ModelSearchException`; `UnsupportedQuery` (a query nothing can answer) is a runtime refusal, not a definition error.
 
 ## Privacy
 
@@ -334,6 +335,20 @@ A search phrase is personal data: it is typed by a person and may be a name, an 
 ## Doctor
 
 `php artisan model-search:doctor` lists what is wrong and exits with a failure when there is anything to report: lag, drifted triggers or indexes, missing or invalid planned indexes, types that are not installed, not ready or installed for another definition, a key field declared for `Infix` alone under the `postgres` driver, failed records, change-log nodes no definition watches, key rows without an entry or with a stage that differs from their entry's, and privacy violations (including a server where `log_parameter_max_length_on_error` cannot be set to 0). `Happenv\ModelSearch\Postgres\Doctor\Doctor::inspect()` returns the same findings for your own alerting. Its key checks are bounded by `doctor.timeout_ms`.
+
+`inspect()` returns a `list<Happenv\ModelSearch\Postgres\Doctor\Finding>` (empty when all is well). A `Finding` is a readonly value object with `string $code` (stable, route on it: `lag`, `index-missing`, `privacy`, ...), `string $message` (names types, tables, indexes and settings, never a phrase or a record's value) and `?string $subject` (the type, index or setting concerned). There is no severity: the host decides what each code is worth.
+
+```php
+use Happenv\ModelSearch\Postgres\Doctor\Doctor;
+use Happenv\ModelSearch\Postgres\Doctor\Finding;
+
+$byCode = collect(app(Doctor::class)->inspect())
+    ->groupBy(static fn (Finding $finding): string => $finding->code);
+
+foreach ($byCode as $code => $findings) {
+    report_to_your_alerting($code, $findings->pluck('message', 'subject')->all());
+}
+```
 
 ## Known limits
 

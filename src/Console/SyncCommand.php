@@ -55,13 +55,24 @@ final class SyncCommand extends Command
             }
         }
 
+        // A downgrade is an older release running the command (a blue/green deploy): it leaves the
+        // type alone and must not fail, as the listener that runs after migrations does not.
+        $failed = false;
+
         foreach ($outcome->refusals as $refusal) {
+            if ($refusal->isDowngrade) {
+                $this->components->warn($refusal->getMessage());
+
+                continue;
+            }
+
             $this->components->error($refusal->getMessage());
+            $failed = true;
         }
 
         $this->components->info($outcome->applied === [] ? 'Triggers and indexes are in sync.' : sprintf('%d change(s) applied.', count($outcome->applied)));
 
-        return $outcome->refusals === [] ? self::SUCCESS : self::FAILURE;
+        return $failed ? self::FAILURE : self::SUCCESS;
     }
 
     private function report(SchemaSync $sync): int

@@ -6,6 +6,7 @@ use Happenv\ModelSearch\Console\DoctorCommand;
 use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Definition\SearchField;
 use Happenv\ModelSearch\Postgres\Doctor\Doctor;
+use Happenv\ModelSearch\Postgres\Doctor\Finding;
 use Happenv\ModelSearch\Postgres\Indexing\SearchIndexer;
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
@@ -189,4 +190,21 @@ it('reports a key field that only the database driver can search by Infix', func
     config(['model-search.driver' => 'database']);
 
     expect(collect(app(Doctor::class)->inspect())->firstWhere('code', 'infix-ignored'))->toBeNull();
+});
+
+it('returns findings with a stable public shape that can be grouped by code', function (): void {
+    $spec = app(SchemaSync::class)->plan()->indexes[0];
+    DB::statement(sprintf('DROP INDEX "%s"', $spec->name));
+
+    $findings = app(Doctor::class)->inspect();
+    $byCode = collect($findings)->groupBy(static fn (Finding $finding): string => $finding->code);
+
+    expect($findings)->each->toBeInstanceOf(Finding::class)
+        ->and($byCode->keys()->all())->toBe(['index-missing'])
+        ->and($findings[0]->code)->toBeString()
+        ->and($findings[0]->message)->toBeString()->not->toBe('')
+        ->and($findings[0]->subject)->toBe($spec->name)
+        ->and((new ReflectionClass(Finding::class))->getDocComment())->not->toContain('@internal')
+        ->and((new ReflectionClass(Doctor::class))->getDocComment())->not->toContain('@internal')
+        ->and(array_keys(get_object_vars($findings[0])))->toBe(['code', 'message', 'subject']);
 });

@@ -36,7 +36,7 @@ use stdClass;
  * The key checks read the whole key table in one pass; they run with parallel workers off and a
  * statement timeout of their own.
  *
- * @internal
+ * Resolve it from the container and call {@see inspect()}; the constructor is not part of the public API.
  */
 final readonly class Doctor
 {
