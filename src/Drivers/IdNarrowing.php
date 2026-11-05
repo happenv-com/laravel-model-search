@@ -89,12 +89,14 @@ final class IdNarrowing
             $tableQuery->select($from.'.*');
         }
 
-        if ($scope instanceof HostQuery) {
-            // On the host's connection, with no phrase in it: a semi-join of the scope's keys.
-            $tableQuery->whereIn($tableQuery->getModel()->getQualifiedKeyName(), $scope->keys());
-        }
-
         $tableQuery->joinSub($list, $alias, $tableQuery->getModel()->getQualifiedKeyName(), '=', $alias.'.search_id');
+
+        if ($scope instanceof HostQuery) {
+            // A join, not a `whereIn`: a join's condition cannot be ORed with the table query's own wheres.
+            // The keys are distinct, so the join never duplicates a row. Host connection, no phrase in it.
+            $scopeAlias = 'search_scope_'.count($tableQuery->getQuery()->joins ?? []);
+            $tableQuery->joinSub($scope->keys()->distinct(), $scopeAlias, $tableQuery->getModel()->getQualifiedKeyName(), '=', $scopeAlias.'.'.$tableQuery->getModel()->getKeyName());
+        }
     }
 
     /**

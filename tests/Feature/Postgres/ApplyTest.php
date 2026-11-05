@@ -388,6 +388,29 @@ describe('the scope of apply', function (): void {
             ->and(apSignatures($unscoped))->toBe(['ABCD-1', 'ABCD-2', 'ABCD-3']);
     })->with(['postgres ready', 'fallback', 'database']);
 
+    it('keeps the scope when the table query has an orWhere, and keeps count and pagination right', function (string $path): void {
+        Order::create(['signature' => 'ABCD-1', 'state' => 'shipped']);
+        Order::create(['signature' => 'ABCD-2', 'state' => 'unshipped']);
+        Order::create(['signature' => 'ABCD-3', 'state' => 'shipped']);
+        Order::create(['signature' => 'OTHER-1', 'state' => 'shipped']);
+        msIndex();
+
+        if ($path === 'database') {
+            config(['model-search.driver' => 'database']);
+        }
+
+        if ($path === 'fallback') {
+            apUnready();
+        }
+
+        $apply = static fn (): Builder => OrderSearch::query('ABCD')->within(Order::query()->where('state', 'shipped'))
+            ->apply(Order::query()->where('state', 'unshipped')->orWhere('state', 'shipped'));
+
+        expect(apSignatures($apply()))->toBe(['ABCD-1', 'ABCD-3'])
+            ->and($apply()->count())->toBe(2)
+            ->and($apply()->orderBy('signature')->paginate(1)->total())->toBe(2);
+    })->with(['postgres ready', 'fallback', 'database']);
+
     it('treats an explicit select of everything like no columns', function (): void {
         Order::create(['signature' => 'ABCD-1']);
         msIndex();
