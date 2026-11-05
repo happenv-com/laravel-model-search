@@ -148,4 +148,24 @@ final class Order extends Model
     {
         return 'nope';
     }
+
+    /**
+     * Joins on a column that is not the owner's primary key.
+     *
+     * @return BelongsTo<Address, $this>
+     */
+    public function billingAddressByCode(): BelongsTo
+    {
+        return $this->belongsTo(Address::class, 'billing_code', 'code');
+    }
+
+    /**
+     * Joins on a column that is not the order's primary key.
+     *
+     * @return HasOne<MarketOrder, $this>
+     */
+    public function marketOrderBySignature(): HasOne
+    {
+        return $this->hasOne(MarketOrder::class, 'order_signature', 'signature');
+    }
 }

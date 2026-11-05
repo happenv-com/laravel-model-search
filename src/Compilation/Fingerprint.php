@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Compilation;
 
+use BackedEnum;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\CompiledField;
 use Happenv\ModelSearch\Definition\FieldType;
 use Happenv\ModelSearch\Definition\Mode;
+use Happenv\ModelSearch\Exceptions\InvalidStageConstraint;
 use Happenv\ModelSearch\Normalization\KeyNormalizer;
 use Happenv\ModelSearch\Normalization\NameNormalizer;
 use Happenv\ModelSearch\Normalization\Normalizer;
@@ -33,7 +35,7 @@ final class Fingerprint
             'partition' => $definition->partition ?? config('model-search.partition_column'),
             'sort_at' => $definition->sortAt,
             'fields' => $fields,
-            'stages' => $definition->stageSql([]),
+            'stages' => self::stages($definition),
             'name_words' => [
                 'min_length' => config('model-search.name_words.min_length'),
                 'max_per_record' => config('model-search.name_words.max_per_record'),
@@ -42,6 +44,29 @@ final class Fingerprint
         ];
 
         return hash('sha256', json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    }
+
+    /**
+     * The stage SQL with its bindings canonicalised: scalars and enum values only.
+     *
+     * @return array{sql: string, bindings: list<bool|float|int|string|null>}
+     */
+    private static function stages(CompiledDefinition $definition): array
+    {
+        $query = $definition->stageSql([]);
+        $bindings = [];
+
+        foreach ($query['bindings'] as $binding) {
+            $binding = $binding instanceof BackedEnum ? $binding->value : $binding;
+
+            if (! is_scalar($binding) && $binding !== null) {
+                throw new InvalidStageConstraint('A stage binds a value that cannot be fingerprinted; a stage must depend only on scalars, null and backed enums.');
+            }
+
+            $bindings[] = $binding;
+        }
+
+        return ['sql' => $query['sql'], 'bindings' => $bindings];
     }
 
     /**

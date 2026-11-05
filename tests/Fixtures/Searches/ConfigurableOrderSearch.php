@@ -23,6 +23,12 @@ final class ConfigurableOrderSearch extends ModelSearch
     /** @var list<string> */
     public static array $openStates = ['unshipped'];
 
+    /** @var (Closure(mixed): mixed)|null */
+    public static ?Closure $constraint = null;
+
+    /** @var list<string> */
+    public static array $watching = ['state'];
+
     public static string $stageLabel = 'Open';
 
     public static int $definitionVersion = 1;
@@ -31,6 +37,8 @@ final class ConfigurableOrderSearch extends ModelSearch
     {
         self::$fields = null;
         self::$openStates = ['unshipped'];
+        self::$constraint = null;
+        self::$watching = ['state'];
         self::$stageLabel = 'Open';
         self::$definitionVersion = 1;
     }
@@ -48,10 +56,11 @@ final class ConfigurableOrderSearch extends ModelSearch
     {
         $states = self::$openStates;
         $label = self::$stageLabel;
+        $constraint = self::$constraint ?? static fn ($query) => $query->whereIn('state', $states);
 
         return [
-            SearchStage::make('open', static fn ($query) => $query->whereIn('state', $states))
-                ->watching(['state'])
+            SearchStage::make('open', $constraint)
+                ->watching(self::$watching)
                 ->label(Closure::fromCallable(static fn (): string => $label)),
             SearchStage::all(),
         ];

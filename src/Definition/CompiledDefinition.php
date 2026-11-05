@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Definition;
 
+use Happenv\ModelSearch\Compilation\ColumnTypes;
 use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Compilation\WatchedTable;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Query\Expression;
 
 final readonly class CompiledDefinition
 {
@@ -19,6 +21,7 @@ final readonly class CompiledDefinition
      * @param  list<CompiledField>  $fields
      * @param  list<SearchStage>  $stages  Always ends with {@see SearchStage::all()}.
      * @param  list<class-string>  $withScopes
+     * @param  string|null  $keySqlType  Catalog type of the primary key column; looked up when null.
      */
     public function __construct(
         public string $modelClass,
@@ -31,6 +34,7 @@ final readonly class CompiledDefinition
         public bool $fallback = false,
         public int $version = 1,
         public array $withScopes = [],
+        public ?string $keySqlType = null,
     ) {}
 
     /**
@@ -74,7 +78,7 @@ final readonly class CompiledDefinition
             }
         }
 
-        $root = new WatchedTable($model->getTable(), [], 'self', $this->morphAlias, $model->getKeyName())->withColumns($rootColumns);
+        $root = new WatchedTable($model->getTable(), [], 'self', $this->morphAlias, $model->getKeyName(), null, null, Sql::connectionName($model), Sql::table($model))->withColumns($rootColumns);
         $merged = [$root->identity() => $root];
 
         foreach ($this->fields as $field) {
@@ -92,6 +96,9 @@ final readonly class CompiledDefinition
      * existing root with its `root_id` (text) and `stage` (the index of the first constrained
      * stage it falls in, or {@see self::ALL_STAGE}).
      *
+     * The ids travel as ONE array parameter and every stage is evaluated by a correlated subquery,
+     * so the parameter count does not grow with the number of roots.
+     *
      * @param  list<string|int>  $rootIds
      * @return array{sql: string, bindings: list<mixed>}
      */
@@ -99,7 +106,7 @@ final readonly class CompiledDefinition
     {
         $model = new ($this->modelClass);
         $key = Sql::ident($model->getKeyName());
-        $literal = Sql::arrayLiteral($rootIds);
+        $type = $this->keySqlType ?? new ColumnTypes()->of($model, $model->getTable(), $model->getKeyName());
         $bindings = [];
         $cases = '';
 
@@ -111,14 +118,14 @@ final readonly class CompiledDefinition
             }
 
             $inner = $model->newQueryWithoutScopes();
-            $inner->select($model->getKeyName());
-            $inner->whereIn($model->getQualifiedKeyName(), $rootIds);
+            $inner->selectRaw('1');
+            $inner->whereColumn(new Expression('"u"."id"'), '=', $model->getQualifiedKeyName());
             $inner->where(static function ($query) use ($constraint): void {
                 $constraint($query);
             });
 
             $base = $inner->getQuery();
-            $cases .= sprintf(' WHEN "r".%s IN (%s) THEN %d', $key, $base->toSql(), $position);
+            $cases .= sprintf(' WHEN EXISTS (%s) THEN %d', $base->toSql(), $position);
             array_push($bindings, ...$base->getBindings());
         }
 
@@ -126,13 +133,13 @@ final readonly class CompiledDefinition
 
         return [
             'sql' => sprintf(
-                'SELECT "r".%1$s::text AS "root_id", (%2$s)::smallint AS "stage" FROM %3$s AS "r" WHERE %4$s',
-                $key,
+                'SELECT "u"."id"::text AS "root_id", (%1$s)::smallint AS "stage" FROM unnest(?::%2$s[]) AS "u"("id") JOIN %3$s AS "r" ON "r".%4$s = "u"."id"',
                 $stage,
+                $type,
                 Sql::table($model),
-                Sql::anyOf('"r".'.$key, $this->keyType),
+                $key,
             ),
-            'bindings' => [...$bindings, $literal],
+            'bindings' => [...$bindings, Sql::arrayLiteral($rootIds)],
         ];
     }
 }

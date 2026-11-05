@@ -51,3 +51,14 @@ describe('stage sql', function (): void {
         expect(collect(DB::select($query['sql'], $query['bindings']))->pluck('stage', 'root_id')->all())->toBe([(string) $product->id => 32767]);
     });
 });
+
+describe('stage sql bindings', function (): void {
+    it('does not bind more than one id parameter however many roots are staged', function (): void {
+        $few = ModelSearch::for(Order::class)->stageSql(['a']);
+        $many = ModelSearch::for(Order::class)->stageSql(array_map(strval(...), range(1, 1500)));
+
+        expect(count($many['bindings']))->toBe(count($few['bindings']))
+            ->and(substr_count($many['sql'], '?'))->toBe(count($many['bindings']))
+            ->and($many['sql'])->toContain('unnest(?::uuid[])');
+    });
+});

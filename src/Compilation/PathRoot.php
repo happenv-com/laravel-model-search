@@ -12,7 +12,7 @@ namespace Happenv\ModelSearch\Compilation;
 final readonly class PathRoot
 {
     /**
-     * @param  'uuid'|'bigint'|'text'  $keyType
+     * @param  string  $keyType  Catalog type name of the key column.
      * @param  array{sql: string, bindings: list<mixed>}|null  $derived  The table seen through the listed global scopes.
      */
     public function __construct(
@@ -22,5 +22,6 @@ final readonly class PathRoot
         public ?string $softDeleteColumn,
         public ?array $derived,
         public string $nodeType,
+        public string $connection,
     ) {}
 }

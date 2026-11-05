@@ -7,14 +7,14 @@ namespace Happenv\ModelSearch\Compilation;
 use InvalidArgumentException;
 
 /**
- * Finds the roots of a changed node: joins from the root down to the node and filters on the node's key.
+ * Finds the roots of changed nodes: joins from the root down to the node and filters on the node's key.
  * Soft deleted rows are kept on purpose, a row that was just deleted must still lead to its roots.
  */
 final readonly class ReverseHop
 {
     /**
      * @param  list<Step>  $steps  The joins from the root down to the node.
-     * @param  'uuid'|'bigint'|'text'  $keyType
+     * @param  string  $keyType  Catalog type name of the node's key column.
      */
     public function __construct(
         public string $nodeType,
@@ -25,6 +25,12 @@ final readonly class ReverseHop
     ) {}
 
     /**
+     * One row per (node, root): `node_id` and `root_id`, both text.
+     *
+     * The limit applies PER NODE, so one widely shared node (an address used by thousands of orders)
+     * cannot starve the others. A caller that wants to detect overflow passes `fan_out_limit + 1`
+     * and treats a node that returns that many rows as overflowing.
+     *
      * @param  list<string|int>  $nodeIds
      * @return array{sql: string, bindings: list<mixed>}
      */
@@ -43,18 +49,25 @@ final readonly class ReverseHop
 
         return [
             'sql' => sprintf(
-                'SELECT DISTINCT %s::text AS "root_id" %s WHERE %s LIMIT %d',
+                'SELECT "n"."id"::text AS "node_id", "x"."root_id" FROM unnest(?::%s[]) AS "n"("id") CROSS JOIN LATERAL (SELECT DISTINCT %s::text AS "root_id" %s WHERE %s = "n"."id" LIMIT %d) AS "x"',
+                $this->keyType,
                 JoinChain::column('r', $this->root->keyColumn),
                 $chain['sql'],
-                Sql::anyOf(JoinChain::column($alias, $this->nodeColumn), $this->keyType),
+                JoinChain::column($alias, $this->nodeColumn),
                 $limit,
             ),
-            'bindings' => [...$chain['bindings'], Sql::arrayLiteral($nodeIds)],
+            'bindings' => [Sql::arrayLiteral($nodeIds), ...$chain['bindings']],
         ];
     }
 
+    /**
+     * Distinct per node type and per route to it, so the billing and the shipping address of an order
+     * (the same table and key) are two hops.
+     */
     public function identity(): string
     {
-        return implode('|', [$this->nodeType, count($this->steps), $this->nodeColumn]);
+        $chain = JoinChain::render($this->root, $this->steps, false);
+
+        return implode('|', [$this->nodeType, $this->nodeColumn, $chain['sql'], json_encode($chain['bindings'], JSON_THROW_ON_ERROR)]);
     }
 }

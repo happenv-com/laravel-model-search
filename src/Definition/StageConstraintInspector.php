@@ -39,6 +39,27 @@ final class StageConstraintInspector
         $query = $builder->getQuery();
 
         $this->inspectQuery($query, $model->getTable(), $stage);
+        $this->guardBindings($query->getBindings(), $stage);
+    }
+
+    /**
+     * A stage may depend only on the watched columns of the row: a value that moves with the clock
+     * (`now()->subDays(90)`) would let a record change stage without any row changing, so the index
+     * would go stale in silence.
+     *
+     * @param  list<mixed>  $bindings
+     */
+    private function guardBindings(array $bindings, SearchStage $stage): void
+    {
+        foreach ($bindings as $binding) {
+            if ($binding instanceof \DateTimeInterface) {
+                throw $this->refusal($stage, 'it compares against a date or time, but a stage must depend only on the row\'s watched columns; a time-relative stage goes stale without any row change');
+            }
+
+            if (! is_scalar($binding) && $binding !== null && ! $binding instanceof \BackedEnum) {
+                throw $this->refusal($stage, 'it binds a value that is not a scalar, null or backed enum, but a stage must depend only on the row\'s watched columns');
+            }
+        }
     }
 
     private function inspectQuery(QueryBuilder $query, string $table, SearchStage $stage): void

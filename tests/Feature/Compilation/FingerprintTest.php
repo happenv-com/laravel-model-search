@@ -3,10 +3,14 @@
 declare(strict_types=1);
 
 use Happenv\ModelSearch\Compilation\Fingerprint;
+use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Definition\SearchField;
+use Happenv\ModelSearch\Definition\SearchStage;
+use Happenv\ModelSearch\Exceptions\InvalidStageConstraint;
 use Happenv\ModelSearch\Normalization\Normalizer;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
+use Happenv\ModelSearch\Tests\Fixtures\Enums\OrderState;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
 
@@ -107,3 +111,28 @@ it('changes when a field path, kind, modes or translatability change', function 
 
     expect(array_unique($seen))->toHaveCount(count($variants));
 });
+
+it('is identical across two compilations of the same definition', function (): void {
+    expect(fingerprintOfConfigurableOrder())->toBe(fingerprintOfConfigurableOrder());
+});
+
+it('canonicalises backed enum bindings to their values', function (): void {
+    $before = fingerprintOfConfigurableOrder();
+    ConfigurableOrderSearch::$constraint = static fn ($query) => $query->whereIn('state', [OrderState::Unshipped]);
+
+    expect(fingerprintOfConfigurableOrder())->toBe($before);
+});
+
+it('refuses to hash a stage binding that is not a scalar, null or enum', function (): void {
+    $definition = new CompiledDefinition(
+        Order::class,
+        'order',
+        'uuid',
+        [SearchField::key('signature')->toCompiled(false)],
+        [SearchStage::make('recent', static fn ($query) => $query->where('purchased_at', '>=', now()))->watching(['purchased_at']), SearchStage::all()],
+        null,
+        null,
+    );
+
+    Fingerprint::of($definition);
+})->throws(InvalidStageConstraint::class);

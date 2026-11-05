@@ -20,9 +20,11 @@ return new class extends Migration
             $table->uuid('id')->primary();
             $table->text('name')->nullable();
             $table->text('phone')->nullable();
+            $table->text('code')->nullable();
             $table->bigInteger('country_id')->nullable();
             $table->timestampsTz(6);
             $table->index('country_id');
+            $table->index('code');
         });
 
         Schema::create('orders', function (Blueprint $table): void {
@@ -34,6 +36,7 @@ return new class extends Migration
             $table->text('state')->default('unshipped');
             $table->uuid('billing_address_id')->nullable();
             $table->uuid('shipping_address_id')->nullable();
+            $table->text('billing_code')->nullable();
             $table->bigInteger('tenant_id')->nullable();
             $table->timestampTz('purchased_at', 6)->nullable();
             $table->timestampsTz(6);
@@ -43,8 +46,10 @@ return new class extends Migration
             $table->uuid('id')->primary();
             $table->uuid('order_id');
             $table->text('market_order_number');
+            $table->text('order_signature')->nullable();
             $table->timestampsTz(6);
             $table->index('order_id');
+            $table->index('order_signature');
         });
 
         Schema::create('parcels', function (Blueprint $table): void {
@@ -64,6 +69,12 @@ return new class extends Migration
             $table->timestampsTz(6);
             $table->index('parcel_id');
             $table->index('order_id');
+        });
+
+        Schema::create('ulid_records', function (Blueprint $table): void {
+            $table->ulid('id')->primary();
+            $table->text('code')->nullable();
+            $table->timestampsTz(6);
         });
 
         Schema::create('tags', function (Blueprint $table): void {

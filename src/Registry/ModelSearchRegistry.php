@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Registry;
 
+use Happenv\ModelSearch\Compilation\ColumnTypes;
 use Happenv\ModelSearch\Compilation\KeyType;
 use Happenv\ModelSearch\Compilation\PathCompiler;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
@@ -147,6 +148,7 @@ final class ModelSearchRegistry
             fallback: $definition->fallback(),
             version: $definition->version(),
             withScopes: $definition->withScopes(),
+            keySqlType: new ColumnTypes()->of($model, $model->getTable(), $model->getKeyName()),
         );
     }
 

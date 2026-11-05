@@ -6,6 +6,7 @@ namespace Happenv\ModelSearch\Compilation;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Small PostgreSQL helpers shared by the compiled SQL of paths, reverse hops and stages.
@@ -14,6 +15,11 @@ use Illuminate\Database\Eloquent\SoftDeletes;
  */
 final class Sql
 {
+    public static function connectionName(Model $model): string
+    {
+        return $model->getConnectionName() ?? DB::getDefaultConnection();
+    }
+
     public static function ident(string $name): string
     {
         return '"'.str_replace('"', '""', $name).'"';
@@ -49,11 +55,11 @@ final class Sql
     /**
      * `<column> = ANY(?::type[])`, the binding being an array literal from {@see self::arrayLiteral()}.
      *
-     * @param  'uuid'|'bigint'|'text'  $type
+     * @param  string  $type  The column's own catalog type, so the comparison can use its index.
      */
     public static function anyOf(string $column, string $type): string
     {
-        return sprintf('%s%s = ANY(?::%s[])', $column, $type === 'text' ? '::text' : '', $type);
+        return sprintf('%s = ANY(?::%s[])', $column, $type);
     }
 
     /**

@@ -23,6 +23,7 @@ use Happenv\ModelSearch\Tests\Fixtures\Models\Invoice;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Parcel;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Product;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\MarketOrderSearchExtension;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\StageProbeSearch;
@@ -284,3 +285,28 @@ it('requires the all stage to come last', function (): void {
 
     $registry->for(Order::class);
 })->throws(UnsupportedStages::class);
+
+it('rejects a stage that depends on the current time', function (): void {
+    ConfigurableOrderSearch::$constraint = static fn ($query) => $query->where('purchased_at', '>=', now()->subDays(90));
+    ConfigurableOrderSearch::$watching = ['purchased_at'];
+    $registry = new ModelSearchRegistry;
+    $registry->register(ConfigurableOrderSearch::class);
+
+    try {
+        $registry->for(Order::class);
+    } finally {
+        ConfigurableOrderSearch::reset();
+    }
+})->throws(InvalidStageConstraint::class, 'time');
+
+it('rejects a stage that binds an object', function (): void {
+    ConfigurableOrderSearch::$constraint = static fn ($query) => $query->where('state', new stdClass);
+    $registry = new ModelSearchRegistry;
+    $registry->register(ConfigurableOrderSearch::class);
+
+    try {
+        $registry->for(Order::class);
+    } finally {
+        ConfigurableOrderSearch::reset();
+    }
+})->throws(InvalidStageConstraint::class);

@@ -78,6 +78,14 @@ final readonly class CompiledPath
     }
 
     /**
+     * The hops from a changed node back to the roots, one per (node type, route).
+     *
+     * Contract for the drainer: a node whose type is the root's morph alias is a root primary key and
+     * has no hop. Several hops may share a node type (the billing and the shipping address of an
+     * order are both `table:addresses`); the drainer unions their roots. Node types are unique per
+     * (table, key column): `table:<name>` for a primary key, `table:<name>#<column>` for any other
+     * column, `<alias>#<column>` for a non-primary key of the root.
+     *
      * @return list<ReverseHop>
      */
     public function reverseHops(): array

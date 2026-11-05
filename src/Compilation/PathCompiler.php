@@ -38,14 +38,17 @@ final class PathCompiler
         $segments = explode('.', $path);
         $column = array_pop($segments);
         $rootModel = new $modelClass;
+        $types = new ColumnTypes;
+        $connection = Sql::connectionName($rootModel);
 
         $root = new PathRoot(
             quotedTable: Sql::table($rootModel),
             keyColumn: $rootModel->getKeyName(),
-            keyType: KeyType::of($rootModel),
+            keyType: $types->of($rootModel, $rootModel->getTable(), $rootModel->getKeyName()),
             softDeleteColumn: Sql::softDeleteColumn($rootModel),
             derived: $this->derivedTable($rootModel, $withScopes),
             nodeType: $rootModel->getMorphClass(),
+            connection: $connection,
         );
 
         /** @var list<Step> $steps */
@@ -54,14 +57,24 @@ final class PathCompiler
         $models = [$rootModel];
         /** @var list<string> $tableNames */
         $tableNames = [$rootModel->getTable()];
-        /** @var list<string> $nodeTypes */
-        $nodeTypes = [$root->nodeType];
         /** @var list<array<string, true>> $columns */
         $columns = [[]];
         /** @var array<string, ReverseHop> $hops */
         $hops = [];
-        /** @var list<array{'child'|'self', string, string}> $tableShapes shape, parent node type, fk column */
+        /** @var list<array{'child'|'self', string, string, Step}> $tableShapes shape, parent node type, fk column, step */
         $tableShapes = [];
+
+        // The node a key column of the table at a depth identifies: the primary key keeps the plain type
+        // (the morph alias for the root, `table:<name>` otherwise); any other column is a distinct node.
+        $typeOf = static function (int $at, string $key) use ($root, &$models, &$tableNames): string {
+            $base = $at === 0 ? $root->nodeType : 'table:'.($tableNames[$at] ?? $root->nodeType);
+            $model = $models[$at];
+
+            return $model instanceof Model && $key === $model->getKeyName() ? $base : $base.'#'.$key;
+        };
+        $keyTypeAt = static function (int $at, string $key) use ($types, $rootModel, &$models, &$tableNames): string {
+            return $types->of($models[$at] ?? $rootModel, $tableNames[$at], $key);
+        };
 
         $current = $rootModel;
 
@@ -70,6 +83,8 @@ final class PathCompiler
                 $depth = count($steps) + 1;
                 $previous = $depth - 1;
                 $previousModel = $models[$previous];
+                $models[] = $toModel;
+                $tableNames[] = $toTable;
 
                 if (! $previousModel instanceof Model || $step->fromColumn !== $previousModel->getKeyName()) {
                     $columns[$previous][$step->fromColumn] = true;
@@ -79,19 +94,21 @@ final class PathCompiler
 
                 if ($step->shape === 'child') {
                     $columns[$depth][$step->toColumn] = true;
+                    $parentType = $typeOf($previous, $step->fromColumn);
 
                     if ($previous > 0 || $step->fromColumn !== $root->keyColumn) {
-                        $this->addHop($hops, new ReverseHop($nodeTypes[$previous], $root, array_slice($steps, 0, $previous), $step->fromColumn, $previousModel instanceof Model ? KeyType::ofColumn($previousModel, $step->fromColumn) : 'text'));
+                        $this->addHop($hops, new ReverseHop($parentType, $root, array_slice($steps, 0, $previous), $step->fromColumn, $keyTypeAt($previous, $step->fromColumn)));
                     }
 
-                    $tableShapes[] = ['child', $nodeTypes[$previous], $step->toColumn];
+                    $tableShapes[] = ['child', $parentType, $step->toColumn, $step];
                 } else {
                     if (! $toModel instanceof Model || $step->toColumn !== $toModel->getKeyName()) {
                         $columns[$depth][$step->toColumn] = true;
                     }
 
-                    $this->addHop($hops, new ReverseHop($toTable, $root, [...$steps, $step], $step->toColumn, $toModel instanceof Model ? KeyType::ofColumn($toModel, $step->toColumn) : 'text'));
-                    $tableShapes[] = ['self', $toTable, $step->toColumn];
+                    $selfType = $typeOf($depth, $step->toColumn);
+                    $this->addHop($hops, new ReverseHop($selfType, $root, [...$steps, $step], $step->toColumn, $keyTypeAt($depth, $step->toColumn)));
+                    $tableShapes[] = ['self', $selfType, $step->toColumn, $step];
                 }
 
                 if ($step->morphColumn !== null) {
@@ -103,9 +120,6 @@ final class PathCompiler
                 }
 
                 $steps[] = $step;
-                $models[] = $toModel;
-                $tableNames[] = $toTable;
-                $nodeTypes[] = $toTable;
             }
 
             $last = $models[count($models) - 1];
@@ -121,11 +135,11 @@ final class PathCompiler
 
         $tables = [];
 
-        foreach ($tableShapes as $index => [$shape, $parentNodeType, $fk]) {
+        foreach ($tableShapes as $index => [$shape, $parentNodeType, $fk, $step]) {
             $depth = $index + 1;
             $names = array_keys($columns[$depth]);
             sort($names);
-            $tables[] = new WatchedTable($tableNames[$depth], $names, $shape, $parentNodeType, $fk);
+            $tables[] = new WatchedTable($tableNames[$depth], $names, $shape, $parentNodeType, $fk, $step->morphColumn, $step->morphValue, $connection, $step->quotedTable);
         }
 
         $rootColumns = array_keys($columns[0]);

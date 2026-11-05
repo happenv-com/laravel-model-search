@@ -17,6 +17,7 @@ use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Parcel;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Product;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Tag;
+use Happenv\ModelSearch\Tests\Fixtures\Models\UlidRecord;
 use Happenv\ModelSearch\Tests\Fixtures\Scopes\NamedAddressScope;
 use Illuminate\Support\Facades\DB;
 
@@ -40,21 +41,33 @@ function contributionsOf(CompiledPath $path, array $ids): array
 
 /**
  * @param  list<string|int>  $nodeIds
- * @return list<string>
+ * @return list<array{string, string}> (node_id, root_id) rows, sorted.
  */
-function rootsOf(CompiledPath $path, string $nodeType, array $nodeIds, int $limit = 100): array
+function hopRowsOf(CompiledPath $path, string $nodeType, array $nodeIds, int $limit = 100): array
 {
     foreach ($path->reverseHops() as $hop) {
         if ($hop->nodeType === $nodeType) {
             $query = $hop->rootsSql($nodeType, $nodeIds, $limit);
-            $roots = array_map(static fn (object $row): string => $row->root_id, DB::select($query['sql'], $query['bindings']));
-            sort($roots);
+            $rows = array_map(static fn (object $row): array => [(string) $row->node_id, (string) $row->root_id], DB::select($query['sql'], $query['bindings']));
+            sort($rows);
 
-            return $roots;
+            return $rows;
         }
     }
 
     throw new RuntimeException('No reverse hop for '.$nodeType);
+}
+
+/**
+ * @param  list<string|int>  $nodeIds
+ * @return list<string>
+ */
+function rootsOf(CompiledPath $path, string $nodeType, array $nodeIds, int $limit = 100): array
+{
+    $roots = array_values(array_unique(array_map(static fn (array $row): string => $row[1], hopRowsOf($path, $nodeType, $nodeIds, $limit))));
+    sort($roots);
+
+    return $roots;
 }
 
 function compilePath(string $model, string $path, bool $translatable = false, array $withScopes = []): CompiledPath
@@ -203,7 +216,7 @@ describe('watched tables', function (): void {
             ->and([$tags[0]->table, $tags[0]->shape, $tags[0]->parentNodeType, $tags[0]->fkColumn, $tags[0]->columns])
             ->toBe(['order_tag', 'child', 'order', 'order_id', ['order_id', 'tag_id']])
             ->and([$tags[1]->table, $tags[1]->shape, $tags[1]->parentNodeType, $tags[1]->fkColumn, $tags[1]->columns])
-            ->toBe(['tags', 'self', 'tags', 'id', ['name']])
+            ->toBe(['tags', 'self', 'table:tags', 'id', ['name']])
             ->and($phone->tables())->toHaveCount(1)
             ->and([$phone->tables()[0]->table, $phone->tables()[0]->shape, $phone->tables()[0]->columns])->toBe(['addresses', 'self', ['phone']])
             ->and($phone->rootColumns())->toBe(['billing_address_id'])
@@ -217,7 +230,7 @@ describe('watched tables', function (): void {
         expect($tables[0]->table)->toBe('parcels')
             ->and($tables[0]->columns)->toBe(['deleted_at', 'order_id'])
             ->and($tables[1]->table)->toBe('carrier_units')
-            ->and($tables[1]->parentNodeType)->toBe('parcels')
+            ->and($tables[1]->parentNodeType)->toBe('table:parcels')
             ->and($tables[1]->columns)->toBe(['parcel_id', 'tracking_number']);
     });
 
@@ -253,8 +266,8 @@ describe('reverse hops', function (): void {
 
         expect($path->reverseHops())->toHaveCount(1)
             ->and($path->reverseHops()[0])->toBeInstanceOf(ReverseHop::class)
-            ->and(rootsOf($path, 'addresses', [$shared->id]))->toBe($expected)
-            ->and(rootsOf($path, 'addresses', [$shared->id], 1))->toHaveCount(1);
+            ->and(rootsOf($path, 'table:addresses', [$shared->id]))->toBe($expected)
+            ->and(rootsOf($path, 'table:addresses', [$shared->id], 1))->toHaveCount(1);
     });
 
     it('walks back up a chain, through the pivot and through intermediate rows', function (): void {
@@ -267,9 +280,9 @@ describe('reverse hops', function (): void {
         $parcel = Parcel::create(['order_id' => $tagged->id]);
         CarrierUnit::create(['parcel_id' => $parcel->id, 'tracking_number' => 'T']);
 
-        expect(rootsOf(compilePath(Order::class, 'billingAddress.country.name'), 'countries', [$country->id]))->toBe([$viaCountry->id])
-            ->and(rootsOf(compilePath(Order::class, 'tags.name'), 'tags', [$tag->id]))->toBe([$tagged->id])
-            ->and(rootsOf(compilePath(Order::class, 'parcelCarrierUnits.tracking_number'), 'parcels', [$parcel->id]))->toBe([$tagged->id]);
+        expect(rootsOf(compilePath(Order::class, 'billingAddress.country.name'), 'table:countries', [$country->id]))->toBe([$viaCountry->id])
+            ->and(rootsOf(compilePath(Order::class, 'tags.name'), 'table:tags', [$tag->id]))->toBe([$tagged->id])
+            ->and(rootsOf(compilePath(Order::class, 'parcelCarrierUnits.tracking_number'), 'table:parcels', [$parcel->id]))->toBe([$tagged->id]);
     });
 
     it('still expands a node that is soft-deleted', function (): void {
@@ -277,12 +290,102 @@ describe('reverse hops', function (): void {
         $parcel = Parcel::create(['order_id' => $order->id]);
         $parcel->delete();
 
-        expect(rootsOf(compilePath(Order::class, 'parcelCarrierUnits.tracking_number'), 'parcels', [$parcel->id]))->toBe([$order->id]);
+        expect(rootsOf(compilePath(Order::class, 'parcelCarrierUnits.tracking_number'), 'table:parcels', [$parcel->id]))->toBe([$order->id]);
     });
 
     it('refuses a node type it does not handle', function (): void {
         $hop = compilePath(Order::class, 'billingAddress.phone')->reverseHops()[0];
 
-        $hop->rootsSql('parcels', ['x'], 1);
+        $hop->rootsSql('table:parcels', ['x'], 1);
     })->throws(InvalidArgumentException::class);
+});
+
+describe('column types', function (): void {
+    it('binds the real type of a fixed-width ULID key and never casts to text', function (): void {
+        $record = UlidRecord::create(['code' => 'U-1']);
+        $path = compilePath(UlidRecord::class, 'code');
+        $query = $path->contributionSql([$record->id]);
+
+        expect($query['sql'])->toContain('::bpchar[]')->not->toContain('::text = ANY')
+            ->and(contributionsOf($path, [$record->id]))->toBe([$record->id.'|U-1']);
+    });
+
+    it('compiles paths that join on columns other than the primary key', function (): void {
+        $address = Address::create(['code' => 'ADDR-1', 'phone' => '77']);
+        $order = Order::create(['signature' => 'SIG-9', 'billing_code' => 'ADDR-1']);
+        MarketOrder::create(['order_id' => $order->id, 'order_signature' => 'SIG-9', 'market_order_number' => 'MO-1']);
+
+        $byCode = compilePath(Order::class, 'billingAddressByCode.phone');
+        $bySignature = compilePath(Order::class, 'marketOrderBySignature.market_order_number');
+
+        expect(contributionsOf($byCode, [$order->id]))->toBe([$order->id.'|77'])
+            ->and(contributionsOf($bySignature, [$order->id]))->toBe([$order->id.'|MO-1'])
+            ->and($byCode->reverseHops()[0]->rootsSql('table:addresses#code', ['ADDR-1'], 5)['sql'])->not->toContain('::text = ANY')
+            ->and($bySignature->reverseHops()[0]->nodeType)->toBe('order#signature')
+            ->and(rootsOf($byCode, 'table:addresses#code', ['ADDR-1']))->toBe([$order->id])
+            ->and(rootsOf($bySignature, 'order#signature', ['SIG-9']))->toBe([$order->id]);
+    });
+
+    it('gives a node reached through another column a different node type', function (): void {
+        $byId = compilePath(Order::class, 'billingAddress.phone')->reverseHops()[0]->nodeType;
+        $byCode = compilePath(Order::class, 'billingAddressByCode.phone')->reverseHops()[0]->nodeType;
+
+        expect($byId)->toBe('table:addresses')
+            ->and($byCode)->toBe('table:addresses#code');
+    });
+
+    it('uses an index on the key column of a seeded table', function (): void {
+        foreach (range(1, 300) as $i) {
+            UlidRecord::create(['code' => 'C'.$i]);
+        }
+
+        $ids = UlidRecord::query()->limit(2)->pluck('id')->all();
+        DB::statement('ANALYZE ulid_records');
+        $query = compilePath(UlidRecord::class, 'code')->contributionSql($ids);
+        DB::statement('SET LOCAL enable_seqscan = off');
+        $plan = implode("\n", array_map(static fn (object $row): string => (string) ((array) $row)['QUERY PLAN'], DB::select('EXPLAIN '.$query['sql'], $query['bindings'])));
+
+        expect($plan)->toContain('ulid_records_pkey');
+    });
+});
+
+describe('reverse hop fan-out', function (): void {
+    it('limits the roots per node, not in total', function (): void {
+        $crowded = Address::create(['phone' => 'A']);
+        $lonely = Address::create(['phone' => 'B']);
+        Order::create(['signature' => '1', 'billing_address_id' => $crowded->id]);
+        Order::create(['signature' => '2', 'billing_address_id' => $crowded->id]);
+        Order::create(['signature' => '3', 'billing_address_id' => $crowded->id]);
+        Order::create(['signature' => '4', 'billing_address_id' => $lonely->id]);
+
+        $rows = hopRowsOf(compilePath(Order::class, 'billingAddress.phone'), 'table:addresses', [$crowded->id, $lonely->id], 2);
+        $perNode = array_count_values(array_column($rows, 0));
+
+        expect($perNode)->toBe([$crowded->id => 2, $lonely->id => 1]);
+    });
+
+    it('tells hops of different relations to the same table apart', function (): void {
+        $billing = compilePath(Order::class, 'billingAddress.phone')->reverseHops()[0];
+        $shipping = compilePath(Order::class, 'shippingAddress.phone')->reverseHops()[0];
+
+        expect($billing->identity())->not->toBe($shipping->identity());
+    });
+});
+
+describe('watched table metadata', function (): void {
+    it('carries the morph discriminator and keeps it in the merge identity', function (): void {
+        $notes = compilePath(Order::class, 'notes.body')->tables()[0];
+        $plain = new WatchedTable('notes', $notes->columns, 'child', 'order', 'noteable_id', null, null, 'pgsql', '"notes"');
+
+        expect([$notes->morphColumn, $notes->morphValue, $notes->fkColumn])->toBe(['noteable_type', 'order', 'noteable_id'])
+            ->and($notes->columns)->toBe(['body', 'noteable_id', 'noteable_type'])
+            ->and($notes->identity())->not->toBe($plain->identity());
+    });
+
+    it('carries the connection and the quoted, prefixed table', function (): void {
+        $table = compilePath(Order::class, 'marketOrder.market_order_number')->tables()[0];
+
+        expect($table->connection)->toBe('pgsql')
+            ->and($table->quotedTable)->toBe('"market_orders"');
+    });
 });
