@@ -85,13 +85,13 @@ it('sets the search settings as literals inside the transaction', function (): v
     config(['model-search.word_similarity_threshold' => 0.3]);
 
     $inside = ssRun(250, static fn (Connection $connection): array => [
-        'level' => $connection->transactionLevel(),
+        'level' => $connection->getPdo()->inTransaction(),
         'timeout' => ssSetting($connection, 'statement_timeout'),
         'threshold' => ssSetting($connection, 'pg_trgm.word_similarity_threshold'),
         'logged' => ssSetting($connection, 'log_parameter_max_length_on_error'),
     ]);
 
-    expect($inside)->toBe(['level' => 1, 'timeout' => '250ms', 'threshold' => '0.3', 'logged' => '0']);
+    expect($inside)->toBe(['level' => true, 'timeout' => '250ms', 'threshold' => '0.3', 'logged' => '0']);
 });
 
 it('derives the timeout from the lowest positive threshold', function (): void {
