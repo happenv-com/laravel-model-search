@@ -114,6 +114,7 @@ SQL;
     #[\Override]
     public function similar(SearchQuery $query): SearchResults
     {
+        NameFieldSelection::assertWhole($this->definition, $query->onlyKinds());
         $hits = $this->hits(Probe::of($query), forTable: false, fuzzy: true);
 
         if (! $hits instanceof Fragment) {

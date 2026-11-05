@@ -47,8 +47,16 @@ final class IdNarrowing
     public static function assertWithinCap(array $ids): void
     {
         if (count($ids) > self::maxIds()) {
-            throw new SearchTooBroad(sprintf('The search matches more than %d records; ask for a longer phrase.', self::maxIds()));
+            throw self::tooBroad();
         }
+    }
+
+    /**
+     * The refusal for a lookup that reached the cap. It never carries the phrase.
+     */
+    public static function tooBroad(): SearchTooBroad
+    {
+        return new SearchTooBroad(sprintf('The search matches more than %d records; ask for a longer phrase.', self::maxIds()));
     }
 
     /**

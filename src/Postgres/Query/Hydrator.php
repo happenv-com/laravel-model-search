@@ -127,6 +127,6 @@ final class Hydrator
             ? array_find($definition->fields, static fn (CompiledField $field): bool => $field->type === FieldType::Name && in_array(Mode::Prefix, $field->modes, true))
             : array_find($definition->fields, static fn (CompiledField $field): bool => $field->kind === $kind);
 
-        return $field?->label instanceof Closure ? ($field->label)() : Str::headline($kind);
+        return $field?->label instanceof Closure ? ($field->label)() : Str::headline($field instanceof CompiledField ? $field->kind : $kind);
     }
 }

@@ -59,6 +59,11 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  *   {@see DatabaseDriver::VIA_PARENT_LIMIT}, then the children by foreign key. Without a scope for
  *   the parent the branch stays closed.
  *
+ * Round two reads the same branches `$scoped`: the host's scope is a lateral lookup by the primary key
+ * inside each branch (before its limit), and `$variants` picks the stage variant. `apply()` reads them
+ * `$table`-wise: no stages, no scope, prefixes from four characters, and `exactOnSource` straight from
+ * the source table; its `via` paths keep the scope of the PARENT.
+ *
  * The predicates of the partial indexes (`kind <> 'name_word'`, `kind = 'name_word'`,
  * `stage < 32767`) come from {@see IndexPlan} and are written into the statement text, never bound:
  * the planner matches a partial index only by a predicate it can read.
@@ -81,6 +86,8 @@ final class CandidateBranches
 
     private const int MIN_PREFIX = 3;
 
+    private const int MIN_PREFIX_FOR_TABLE = 4;
+
     private const int MIN_SUFFIX = 4;
 
     private int $counter = 0;
@@ -91,23 +98,32 @@ final class CandidateBranches
 
     private readonly bool $staged;
 
+    /**
+     * @param  list<int>|null  $variants  Which stage variants a type with stages reads (null: both).
+     */
     private function __construct(
         private readonly CompiledDefinition $definition,
         private readonly SearchQuery $query,
         private readonly int $pool,
         private readonly int $typeIndex,
+        private readonly bool $scoped,
+        private readonly ?array $variants,
+        private readonly bool $table,
     ) {
         $this->model = new ($definition->modelClass);
         $this->keys = TableNames::forConnection(Sql::connectionName($this->model))->quoted(TableNames::forConnection(Sql::connectionName($this->model))->keys());
-        $this->staged = $query->stagesEnabled() && $definition->constrainedStage() instanceof SearchStage;
+        $this->staged = ! $table && self::isStaged($definition, $query);
     }
 
     /**
+     * @param  bool  $scoped  Round two: the scope of the host is applied inside each branch, before its limit.
+     * @param  list<int>|null  $variants  Round two: which stage variants of a type with stages to read ({@see self::STAGE_ZERO}, {@see self::ALL_STAGES}); null reads both.
+     * @param  bool  $table  `apply()`: no stages, no scope of the host, prefixes from four characters, and the source column read without the host.
      * @return list<Fragment> Each already wrapped in parentheses.
      */
-    public static function for(CompiledDefinition $definition, SearchQuery $query, int $pool, int $typeIndex = 0): array
+    public static function for(CompiledDefinition $definition, SearchQuery $query, int $pool, int $typeIndex = 0, bool $scoped = false, ?array $variants = null, bool $table = false): array
     {
-        return new self($definition, $query, $pool, $typeIndex)->build();
+        return new self($definition, $query, $pool, $typeIndex, $scoped, $variants, $table)->build();
     }
 
     /**
@@ -126,7 +142,7 @@ final class CandidateBranches
         $branches = [];
 
         foreach ($this->keyPlan($this->definition, $this->query->onlyKinds()) as $item) {
-            $stageVariants = $item['mode'] === Mode::Exact || ! $this->staged ? [self::PLAIN] : [self::STAGE_ZERO, self::ALL_STAGES];
+            $stageVariants = $item['mode'] === Mode::Exact || ! $this->staged ? [self::PLAIN] : $this->stageVariants();
 
             foreach ($stageVariants as $variant) {
                 $branches[] = $this->keyBranch($item['mode'], $item['variant'], $item['kinds'], $variant);
@@ -134,14 +150,14 @@ final class CandidateBranches
         }
 
         foreach ($this->nameSets() as $set) {
-            foreach ($this->staged ? [self::STAGE_ZERO, self::ALL_STAGES] : [self::PLAIN] as $variant) {
+            foreach ($this->staged ? $this->stageVariants() : [self::PLAIN] as $variant) {
                 $branches[] = $this->wordBranch($set['main'], $set['others'], $variant);
             }
         }
 
         foreach ($this->definition->fields as $field) {
             if ($field->exactOnSource && $this->chosen($field) && $this->allows(Mode::Exact) && QueryVariants::keysFor($this->query->phraseText(), $this->query->viewerLocale()) !== []) {
-                $branch = $this->sourceBranch($field);
+                $branch = $this->table ? $this->sourceTableBranch($field) : $this->sourceBranch($field);
 
                 if ($branch instanceof Fragment) {
                     $branches[] = $branch;
@@ -239,20 +255,57 @@ final class CandidateBranches
         $where[] = $condition;
         $bindings[] = $binding;
 
+        $authorization = $this->authorization();
+
         return new Fragment(
             sprintf(
-                '(SELECT %d AS ti, k.subject_id, %d AS level, k.kind, k.value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, (k.stage < %d) AS s0, %d AS bk, false AS src, %d AS br, false AS ptr FROM %s k WHERE %s%s LIMIT %d)',
+                '(SELECT %d AS ti, k.subject_id, %d AS level, k.kind, k.value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, (k.stage < %d) AS s0, %d AS bk, false AS src, %d AS br, false AS ptr FROM %s k%s WHERE %s%s LIMIT %d)',
                 $this->typeIndex,
                 $mode->rank(),
                 CompiledDefinition::ALL_STAGE,
                 $stageVariant,
                 $this->nextBranch(),
                 $this->keys,
+                $authorization->sql,
                 implode(' AND ', $where),
                 $order,
                 $this->pool + 1,
             ),
-            $bindings,
+            [...$authorization->bindings, ...$bindings],
+        );
+    }
+
+    /**
+     * The stage variants a type with stages reads.
+     *
+     * @return list<int>
+     */
+    private function stageVariants(): array
+    {
+        return $this->variants ?? [self::STAGE_ZERO, self::ALL_STAGES];
+    }
+
+    /**
+     * Round two: the scope of the host inside the branch, as a lateral lookup by the primary key, so the
+     * scan in the order of the index stops after the records IN scope, not after the keys read.
+     * An `EXISTS` here could become a hash semi join over the whole host. Empty in round one and for a table.
+     */
+    private function authorization(): Fragment
+    {
+        if (! $this->scoped) {
+            return new Fragment('');
+        }
+
+        $host = $this->query->scope()->sql();
+
+        return new Fragment(
+            sprintf(
+                ' JOIN LATERAL (SELECT 1 FROM (%s) h WHERE h.%s = k.subject_id::%s LIMIT 1) auth ON true',
+                $host['sql'],
+                Sql::ident(HostQuery::KEY_ALIAS),
+                $this->definition->resolvedKeySqlType(),
+            ),
+            $host['bindings'],
         );
     }
 
@@ -266,8 +319,9 @@ final class CandidateBranches
     private function wordBranch(string $main, array $others, int $stageVariant): Fragment
     {
         $select = [$main];
-        $laterals = [];
-        $lateralBindings = [];
+        $authorization = $this->authorization();
+        $laterals = [$authorization->sql];
+        $lateralBindings = $authorization->bindings;
         $bindings = [$this->definition->morphAlias];
         $where = [sprintf('k.subject_type = ? AND k.%s', IndexPlan::NAME_WORDS)];
 
@@ -341,6 +395,41 @@ final class CandidateBranches
     }
 
     /**
+     * The source table joined with the variants of the phrase on the field's own column, for a table:
+     * the viewer's scope is not applied here (the table query applies it), only the partition.
+     */
+    private function sourceTableBranch(CompiledField $field): ?Fragment
+    {
+        $phrase = $this->query->phraseText();
+        $trimmed = trim($phrase);
+        $variants = array_values(array_unique(array_filter(
+            [$phrase, $trimmed, mb_strtoupper($trimmed), mb_strtolower($trimmed)],
+            static fn (string $variant): bool => $variant !== '',
+        )));
+
+        if ($variants === []) {
+            return null;
+        }
+
+        $partition = $this->query->partitionFilter();
+
+        return new Fragment(
+            sprintf(
+                '(SELECT %1$d AS ti, s.%2$s::text AS subject_id, 0 AS level, CAST(? AS text) AS kind, s.%3$s::text AS value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, false AS s0, %4$d AS bk, true AS src, %5$d AS br, false AS ptr FROM %6$s AS s JOIN unnest(?::text[]) AS v(variant) ON s.%3$s = v.variant%7$s LIMIT %8$d)',
+                $this->typeIndex,
+                Sql::ident($this->model->getKeyName()),
+                Sql::ident($field->path),
+                self::PLAIN,
+                $this->nextBranch(),
+                Sql::table($this->model),
+                $partition === null ? '' : sprintf(' AND s.%s = ?', Sql::ident($partition['column'])),
+                $this->pool + 1,
+            ),
+            [$field->kind, Sql::arrayLiteral($variants), ...($partition === null ? [] : [$partition['value']])],
+        );
+    }
+
+    /**
      * Records found through a parent: the parent's candidates inside the parent's scope, then the
      * records that belong to them. Closed (null) without a scope for the parent or when the relation
      * is not a BelongsTo.
@@ -403,10 +492,12 @@ final class CandidateBranches
         $entries = TableNames::forConnection(Sql::connectionName($this->model))->quoted(TableNames::forConnection(Sql::connectionName($this->model))->entries());
         $stageBindings = $this->staged ? [$this->definition->morphAlias] : [];
         $partition = $this->query->partitionFilter();
+        $authorization = $this->scoped ? $this->childAuthorization() : new Fragment('');
+        $strict = $this->scoped || $this->table;
 
         return new Fragment(
             sprintf(
-                '(SELECT %1$d AS ti, ch.%2$s::text AS subject_id, (%3$d + pc.level) AS level, CAST(? AS text) AS kind, CASE WHEN pc.kind = ANY(?::text[]) THEN NULL ELSE pc.value END AS value, CAST(? AS text) AS via, CAST(0 AS real) AS sim, %4$s AS s0, %5$d AS bk, false AS src, %6$d AS br, pc.over AS ptr FROM (%7$s) AS pc%8$s LEFT JOIN %9$s AS ch ON ch.%10$s = %11$s%14$s%12$s WHERE ch.%2$s IS NOT NULL OR (pc.over AND pc.rn = 1) LIMIT %13$d)',
+                '(SELECT %1$d AS ti, ch.%2$s::text AS subject_id, (%3$d + pc.level) AS level, CAST(? AS text) AS kind, CASE WHEN pc.kind = ANY(?::text[]) THEN NULL ELSE pc.value END AS value, CAST(? AS text) AS via, CAST(0 AS real) AS sim, %4$s AS s0, %5$d AS bk, false AS src, %6$d AS br, pc.over AS ptr FROM (%7$s) AS pc%8$s LEFT JOIN %9$s AS ch ON ch.%10$s = %11$s%14$s%12$s%15$s WHERE %16$s LIMIT %13$d)',
                 $this->typeIndex,
                 Sql::ident($this->model->getKeyName()),
                 Hit::VIA_OFFSET,
@@ -421,8 +512,30 @@ final class CandidateBranches
                 $this->staged ? sprintf(' LEFT JOIN %s AS ce ON ce.subject_type = ? AND ce.subject_id = ch.%s::text', $entries, Sql::ident($this->model->getKeyName())) : '',
                 $this->pool + 1,
                 $partition === null ? '' : sprintf(' AND ch.%s = ?', Sql::ident($partition['column'])),
+                $authorization->sql,
+                // Round one keeps a sentinel row for a pool of parents that gave no child, to carry the flag; the others have no use for it.
+                $strict ? ($this->scoped ? 'auth.ok IS NOT NULL' : sprintf('ch.%s IS NOT NULL', Sql::ident($this->model->getKeyName()))) : sprintf('ch.%s IS NOT NULL OR (pc.over AND pc.rn = 1)', Sql::ident($this->model->getKeyName())),
             ),
-            [$field->kind, Sql::arrayLiteral($revealing), $field->kind, ...$union->bindings, ...($partition === null ? [] : [$partition['value']]), ...$stageBindings],
+            [$field->kind, Sql::arrayLiteral($revealing), $field->kind, ...$union->bindings, ...($partition === null ? [] : [$partition['value']]), ...$stageBindings, ...$authorization->bindings],
+        );
+    }
+
+    /**
+     * Round two: the children are asked of the host's scope before the limit, so children out of
+     * scope do not use up the room of those in it.
+     */
+    private function childAuthorization(): Fragment
+    {
+        $host = $this->query->scope()->sql();
+
+        return new Fragment(
+            sprintf(
+                ' LEFT JOIN LATERAL (SELECT 1 AS ok FROM (%s) h WHERE h.%s = ch.%s LIMIT 1) auth ON true',
+                $host['sql'],
+                Sql::ident(HostQuery::KEY_ALIAS),
+                Sql::ident($this->model->getKeyName()),
+            ),
+            $host['bindings'],
         );
     }
 
@@ -547,7 +660,7 @@ final class CandidateBranches
                     }
                 }
 
-                if ($longest === null || mb_strlen($words[$longest]) < self::MIN_PREFIX) {
+                if ($longest === null || mb_strlen($words[$longest]) < $this->minLength(Mode::Prefix)) {
                     continue;
                 }
 
@@ -583,7 +696,7 @@ final class CandidateBranches
     private function minLength(Mode $mode): int
     {
         return match ($mode) {
-            Mode::Prefix => self::MIN_PREFIX,
+            Mode::Prefix => $this->table ? self::MIN_PREFIX_FOR_TABLE : self::MIN_PREFIX,
             Mode::Suffix => self::MIN_SUFFIX,
             default => 1,
         };

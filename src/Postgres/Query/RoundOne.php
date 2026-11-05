@@ -40,26 +40,28 @@ use Happenv\ModelSearch\Query\SearchQuery;
 final class RoundOne
 {
     /**
-     * @param  array<string, array{definition: CompiledDefinition, query: SearchQuery, host: HostQuery}>  $targets  By morph alias.
+     * @param  array<string, array{definition: CompiledDefinition, query: SearchQuery, host: HostQuery, plan?: RoundPlan}>  $targets  By morph alias; a target without a plan is read the way round one reads it.
      * @return array{sql: string, bindings: list<mixed>}|null Null when no branch of any type survives the phrase.
      */
     public static function sql(array $targets): ?array
     {
-        $pool = self::pool();
         $branches = [];
+        $pools = [];
         $types = [];
         $position = 0;
 
         foreach ($targets as $alias => $target) {
-            $own = CandidateBranches::for($target['definition'], $target['query'], $pool, $position);
+            $plan = $target['plan'] ?? RoundPlan::first();
+            $own = CandidateBranches::for($target['definition'], $target['query'], $plan->pool, $position, $plan->scoped, $plan->variants);
             array_push($branches, ...$own);
+            $pools[$position] = $plan->pool;
             $types[$position] = [
                 'alias' => $alias,
                 'definition' => $target['definition'],
                 'query' => $target['query'],
                 'host' => $target['host'],
                 'branches' => $own !== [],
-                'staged' => CandidateBranches::isStaged($target['definition'], $target['query']),
+                'staged' => $plan->filtersStage && CandidateBranches::isStaged($target['definition'], $target['query']),
             ];
             $position++;
         }
@@ -102,7 +104,7 @@ final class RoundOne
         $sql = sprintf(
             <<<'SQL'
 WITH cand AS MATERIALIZED (
-  SELECT u.*, %1$s AS w, count(*) OVER (PARTITION BY u.br) > %2$d AS is_full
+  SELECT u.*, %1$s AS w, count(*) OVER (PARTITION BY u.br) > %2$s AS is_full
   FROM (%3$s) AS u
 ),
 dd AS (
@@ -144,7 +146,7 @@ SELECT 'flag', ty.ti, CAST(NULL AS text), CAST(NULL AS integer), CAST(NULL AS te
 FROM ty LEFT JOIN fl f ON f.ti = ty.ti
 SQL,
             $weights->sql,
-            $pool,
+            self::poolCase($pools),
             $candidates->sql,
             CandidateBranches::STAGE_ZERO,
             CandidateBranches::PLAIN,
@@ -304,11 +306,20 @@ SQL,
         return new Fragment($sql.' ELSE 0 END', $bindings);
     }
 
-    private static function pool(): int
+    /**
+     * The pool of the branches of each type, as a literal `CASE` over the type's position.
+     *
+     * @param  array<int, int>  $pools
+     */
+    private static function poolCase(array $pools): string
     {
-        $pool = config('model-search.pool');
+        $sql = 'CASE u.ti';
 
-        return is_int($pool) && $pool > 0 ? $pool : 200;
+        foreach ($pools as $position => $pool) {
+            $sql .= sprintf(' WHEN %d THEN %d', $position, $pool);
+        }
+
+        return $sql.' ELSE 0 END';
     }
 
     private static function int(mixed $value): int

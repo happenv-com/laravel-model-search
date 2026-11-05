@@ -10,15 +10,18 @@ use Happenv\ModelSearch\Definition\CompiledField;
 use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Drivers\DatabaseDriver;
 use Happenv\ModelSearch\Drivers\Driver;
+use Happenv\ModelSearch\Drivers\IdNarrowing;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Happenv\ModelSearch\Postgres\Session\SearchSession;
 use Happenv\ModelSearch\Query\ChargeOnce;
+use Happenv\ModelSearch\Query\HostQuery;
 use Happenv\ModelSearch\Query\NameFieldSelection;
 use Happenv\ModelSearch\Query\SearchQuery;
 use Happenv\ModelSearch\Query\SearchResults;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
 
 /**
@@ -36,10 +39,14 @@ use Illuminate\Support\Collection;
  * unready types reads the ready ones in its one statement and the others one by one, and returns
  * them together, each type ranked on its own.
  *
- * Round two (a type that the first round could not settle), `similar()`, `apply()` and `candidates()`
- * are still served by the {@see DatabaseDriver}.
+ * A type the first round could not settle (a pool eaten by records the viewer may not see) goes on to
+ * {@see RoundTwo}, which never starts after a timeout. `apply()` resolves the keys of the matching
+ * records on the search connection ({@see ApplyIds}) and hands them to the table query; `similar()`
+ * is one `Fuzzy` statement over the names ({@see SimilarQuery}). A type whose index is not ready is
+ * answered the same way for all three (the source tables, or only its `exactOnSource` fields).
+ * `candidates()` is still served by the {@see DatabaseDriver}.
  *
- * The viewer's rate limit is charged once per palette, before its first statement.
+ * The viewer's rate limit is charged once per call, before its first statement.
  */
 final readonly class PostgresDriver implements Driver
 {
@@ -77,9 +84,12 @@ final readonly class PostgresDriver implements Driver
             }
 
             $building = true;
-            $results[$definition->morphAlias] = $definition->fallback
-                ? new DatabaseDriver($definition)->get($query)
-                : $this->sourceOnly($query, $definition);
+            $kinds = $this->sourceKinds($query, $definition);
+            $results[$definition->morphAlias] = match (true) {
+                $definition->fallback => new DatabaseDriver($definition)->get($query),
+                $kinds === null => new SearchResults,
+                default => new DatabaseDriver($definition)->get($query->only($kinds)->using(Mode::Exact)),
+            };
         }
 
         foreach ($ready as $connection => $group) {
@@ -94,8 +104,10 @@ final readonly class PostgresDriver implements Driver
     /**
      * What a type without a fallback can answer while its index is being built: the `exactOnSource`
      * fields, which read the source table anyway (P§10.5), by their exact value, and nothing else.
+     *
+     * @return list<string>|null The kinds to search, null when there is nothing to search.
      */
-    private function sourceOnly(SearchQuery $query, CompiledDefinition $definition): SearchResults
+    private function sourceKinds(SearchQuery $query, CompiledDefinition $definition): ?array
     {
         $modes = $query->onlyModes();
         $named = $query->onlyKinds();
@@ -105,27 +117,109 @@ final readonly class PostgresDriver implements Driver
         ));
 
         if ($kinds === [] || ($modes !== [] && ! in_array(Mode::Exact, $modes, true))) {
-            return new SearchResults;
+            return null;
         }
 
-        return new DatabaseDriver($definition)->get($query->only($kinds)->using(Mode::Exact));
+        return $kinds;
     }
 
     #[\Override]
     public function similar(SearchQuery $query): SearchResults
     {
-        return new DatabaseDriver($this->definition)->similar($query);
+        NameFieldSelection::assertWhole($this->definition, $query->onlyKinds());
+
+        if (! $this->isReady($this->definition)) {
+            // The exactOnSource fields cannot answer a fuzzy search, so a type without a fallback has nothing to offer meanwhile.
+            return ($this->definition->fallback ? new DatabaseDriver($this->definition)->similar($query) : new SearchResults)->whileIndexBuilding();
+        }
+
+        $statement = SimilarQuery::sql($this->definition, $query);
+
+        if ($statement === null) {
+            return new SearchResults;
+        }
+
+        $query->charge();
+
+        try {
+            $rows = resolve(SearchSession::class)->run(
+                Sql::connectionName(new ($this->definition->modelClass)),
+                $this->timeout('similar', 1000),
+                static fn (Connection $db): array => array_values($db->select($statement['sql'], $statement['bindings'])),
+            );
+        } catch (SearchTimedOut) {
+            return new SearchResults(timedOut: true);
+        }
+
+        $candidates = SimilarQuery::read($this->definition, $rows);
+        $round = new TypeRound($candidates, count($candidates), 0, false, false, false, false, $query->maxResults());
+
+        return new SearchResults(Hydrator::results($query, $this->definition, $round));
     }
 
     #[\Override]
     public function apply(SearchQuery $query, Builder $tableQuery): Builder
     {
-        return new DatabaseDriver($this->definition)->apply($query, $tableQuery);
+        NameFieldSelection::assertWhole($this->definition, $query->onlyKinds());
+
+        if (! $this->isReady($this->definition)) {
+            return $this->applyWhileBuilding($query, $tableQuery);
+        }
+
+        $statement = ApplyIds::sql($this->definition, $query);
+        $ids = [];
+
+        if ($statement !== null) {
+            $query->charge();
+            $rows = resolve(SearchSession::class)->run(
+                Sql::connectionName(new ($this->definition->modelClass)),
+                $this->timeout('search', 300),
+                static fn (Connection $db): array => array_values($db->select($statement['sql'], $statement['bindings'])),
+            );
+            $ids = ApplyIds::read($rows);
+        }
+
+        $query->matched(count($ids));
+        IdNarrowing::narrow($tableQuery, $ids, $this->definition->resolvedKeySqlType());
+
+        return $tableQuery;
+    }
+
+    /**
+     * `apply()` for a type whose index is not ready: its source tables, or only its `exactOnSource` fields.
+     *
+     * @template TModel of Model
+     *
+     * @param  Builder<TModel>  $tableQuery
+     * @return Builder<TModel>
+     */
+    private function applyWhileBuilding(SearchQuery $query, Builder $tableQuery): Builder
+    {
+        if ($this->definition->fallback) {
+            return new DatabaseDriver($this->definition)->apply($query, $tableQuery);
+        }
+
+        $kinds = $this->sourceKinds($query, $this->definition);
+
+        if ($kinds === null) {
+            $query->matched(0);
+            IdNarrowing::narrow($tableQuery, [], $this->definition->resolvedKeySqlType());
+
+            return $tableQuery;
+        }
+
+        return new DatabaseDriver($this->definition)->apply($query->only($kinds)->using(Mode::Exact), $tableQuery);
     }
 
     #[\Override]
     public function candidates(SearchQuery $query): Collection
     {
+        if (! $this->isReady($this->definition) && ! $this->definition->fallback) {
+            $kinds = $this->sourceKinds($query, $this->definition);
+
+            return $kinds === null ? new Collection : new DatabaseDriver($this->definition)->candidates($query->only($kinds)->using(Mode::Exact));
+        }
+
         return new DatabaseDriver($this->definition)->candidates($query);
     }
 
@@ -157,7 +251,7 @@ final readonly class PostgresDriver implements Driver
         try {
             $rows = resolve(SearchSession::class)->run(
                 $connection,
-                $this->timeout(),
+                $this->timeout('search', 300),
                 static fn (Connection $db): array => array_values($db->select($statement['sql'], $statement['bindings'])),
             );
         } catch (SearchTimedOut) {
@@ -165,13 +259,17 @@ final readonly class PostgresDriver implements Driver
         }
 
         $rounds = RoundOne::read($rows, array_keys($targets), $limits);
+        $timedOut = [];
+
+        $this->completed($connection, $targets, $rounds, $timedOut);
+
         $results = [];
 
         foreach ($targets as $alias => $target) {
             $round = $rounds[$alias];
             $results[$alias] = new SearchResults(
                 Hydrator::results($target['query'], $target['definition'], $round),
-                false,
+                isset($timedOut[$alias]),
                 Hydrator::settledStage($target['query'], $target['definition'], $round),
             );
         }
@@ -179,15 +277,74 @@ final readonly class PostgresDriver implements Driver
         return $results;
     }
 
+    /**
+     * Round two for the types round one could not settle: one statement for all of them, and a further
+     * one for the types with stages whose scoped first stage found nothing besides exact hits. A type
+     * whose statement ran out of time keeps what the earlier round found and is reported as timed out.
+     *
+     * @param  array<string, array{definition: CompiledDefinition, query: SearchQuery, host: HostQuery}>  $targets
+     * @param  array<string, TypeRound>  $rounds  Replaced, type by type, by what round two found.
+     * @param  array<string, true>  $timedOut
+     */
+    private function completed(string $connection, array $targets, array &$rounds, array &$timedOut): void
+    {
+        $pending = RoundTwo::phases($targets, $rounds);
+
+        while ($pending !== []) {
+            $statement = RoundTwo::sql($targets, $pending);
+
+            if ($statement === null) {
+                return;
+            }
+
+            try {
+                $rows = resolve(SearchSession::class)->run(
+                    $connection,
+                    $this->timeout('search', 300),
+                    static fn (Connection $db): array => array_values($db->select($statement['sql'], $statement['bindings'])),
+                );
+            } catch (SearchTimedOut) {
+                foreach (array_keys($pending) as $alias) {
+                    $timedOut[$alias] = true;
+                }
+
+                return;
+            }
+
+            $limits = [];
+
+            foreach (array_keys($pending) as $alias) {
+                $limits[$alias] = $targets[$alias]['query']->maxResults();
+            }
+
+            $read = RoundOne::read($rows, array_keys($pending), $limits);
+            $next = [];
+
+            foreach ($pending as $alias => $phase) {
+                $rounds[$alias] = $read[$alias];
+
+                // The scoped first stage held nothing besides exact hits: the type may now read every stage.
+                if ($phase === RoundTwoPhase::StageZero && ! $read[$alias]->answeredByStageZero()) {
+                    $next[$alias] = RoundTwoPhase::AllStages;
+                }
+            }
+
+            $pending = $next;
+        }
+    }
+
     private function isReady(CompiledDefinition $definition): bool
     {
         return new IndexState(Sql::connectionName(new ($definition->modelClass)))->isReady($definition->morphAlias);
     }
 
-    private function timeout(): int
+    /**
+     * @param  'search'|'similar'  $setting
+     */
+    private function timeout(string $setting, int $default): int
     {
-        $milliseconds = config('model-search.search.timeout_ms');
+        $milliseconds = config('model-search.'.$setting.'.timeout_ms');
 
-        return is_int($milliseconds) && $milliseconds > 0 ? $milliseconds : 300;
+        return is_int($milliseconds) && $milliseconds > 0 ? $milliseconds : $default;
     }
 }
