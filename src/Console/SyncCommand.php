@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Console;
 
+use Happenv\ModelSearch\Exceptions\InstallRefused;
 use Happenv\ModelSearch\Exceptions\SchemaNotInstalled;
 use Happenv\ModelSearch\Exceptions\SchemaSyncIncomplete;
 use Happenv\ModelSearch\Postgres\Schema\SchemaChange;
@@ -36,6 +37,10 @@ final class SyncCommand extends Command
         } catch (SchemaNotInstalled|SchemaSyncIncomplete $exception) {
             $this->components->error($exception->getMessage());
 
+            if ($exception instanceof SchemaSyncIncomplete) {
+                $this->printRefusals($exception->refusals);
+            }
+
             return self::FAILURE;
         }
 
@@ -55,13 +60,36 @@ final class SyncCommand extends Command
             }
         }
 
-        foreach ($outcome->refusals as $refusal) {
-            $this->components->error($refusal->getMessage());
-        }
+        $failed = $this->printRefusals($outcome->refusals);
 
         $this->components->info($outcome->applied === [] ? 'Triggers and indexes are in sync.' : sprintf('%d change(s) applied.', count($outcome->applied)));
 
-        return $outcome->refusals === [] ? self::SUCCESS : self::FAILURE;
+        return $failed ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * A downgrade is an older release running the command (a blue/green deploy): it leaves the
+     * type alone and is only a warning, as in the listener that runs after migrations.
+     *
+     * @param  list<InstallRefused>  $refusals
+     * @return bool Whether any refusal was not a downgrade.
+     */
+    private function printRefusals(array $refusals): bool
+    {
+        $failed = false;
+
+        foreach ($refusals as $refusal) {
+            if ($refusal->isDowngrade) {
+                $this->components->warn($refusal->getMessage());
+
+                continue;
+            }
+
+            $this->components->error($refusal->getMessage());
+            $failed = true;
+        }
+
+        return $failed;
     }
 
     private function report(SchemaSync $sync): int

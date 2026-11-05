@@ -311,6 +311,7 @@ Every definition has a fingerprint (its fields, paths, stage constraint and name
 - **Every change to a definition requires a higher `version()`**: its fields (including the order they are declared in: name words are capped per record in that order), modes, stages, normalizers or relations, and also `name_words.*`, `each.max_per_record`, `partition_column` and `sortAt()`. Without the bump `migrate` fails with `InstallRefused` ("different fingerprint"), the doctor reports `fingerprint-differs`, and the type keeps serving from its old projection.
 - Change a definition's **behaviour** in a way the fingerprint cannot see (a custom normalizer, a `revealUsing` that changes what is indexed) and you must **bump `version()`** to force a rebuild.
 - **Rolling back to an older release requires a version bump too:** a revert would otherwise present an older version than the one installed and be refused. Bump it above the one you are reverting from.
+- `model-search:sync` treats a downgrade refusal (an older release running it) like the post-migration listener does: it prints a warning and exits 0. Any other refusal exits non-zero.
 - A changed definition rebuilds the type in the background from its source tables. Searches keep using the existing index meanwhile and report `indexBuilding`, as described in [While an index is building](#while-an-index-is-building).
 
 ### Several databases
@@ -319,7 +320,7 @@ Sync, drain and doctor run on the **default connection**. A host with several da
 
 ## Public API
 
-Everything marked `@internal` (the compiler, the SQL builders, the drivers, the schema and indexing helpers, the normalization helpers) may change in any 0.x release. That includes `DriverManager::extend()` and the `Driver` interface: a custom driver needs internal accessors of `SearchQuery`. Public: the definition classes, the registry and its facade (`models()` among them), `SearchIndexer::hasDueFailures()` (a parked failure is due for its automatic retry; one `EXISTS`, with no compilation, to tell whether an otherwise idle drain has work; like `lag()` it needs the package's tables), `SearchQuery`, the results, the exceptions, the events, the contracts, the commands, the jobs, `Normalizer`, `SearchIndexer`, `IndexState` and `DrainStats`. Every exception implements `Happenv\ModelSearch\Exceptions\ModelSearchException`; `UnsupportedQuery` (a query nothing can answer) is a runtime refusal, not a definition error.
+Everything marked `@internal` (the compiler, the SQL builders, the drivers, the schema and indexing helpers, the normalization helpers) may change in any 0.x release. That includes `DriverManager::extend()` and the `Driver` interface: a custom driver needs internal accessors of `SearchQuery`. Public: the definition classes, the registry and its facade (`models()` among them), `SearchIndexer::hasDueFailures()` (a parked failure is due for its automatic retry; one `EXISTS`, with no compilation, to tell whether an otherwise idle drain has work; like `lag()` it needs the package's tables), `SearchQuery`, the results, the exceptions, the events, the contracts, the commands, the jobs, `Normalizer`, `SearchIndexer`, `IndexState`, `DrainStats`, `Doctor` (its `inspect()` only) and `Finding`. Every exception implements `Happenv\ModelSearch\Exceptions\ModelSearchException`; `UnsupportedQuery` (a query nothing can answer) is a runtime refusal, not a definition error.
 
 ## Privacy
 
@@ -334,6 +335,35 @@ A search phrase is personal data: it is typed by a person and may be a name, an 
 ## Doctor
 
 `php artisan model-search:doctor` lists what is wrong and exits with a failure when there is anything to report: lag, drifted triggers or indexes, missing or invalid planned indexes, types that are not installed, not ready or installed for another definition, a key field declared for `Infix` alone under the `postgres` driver, failed records, change-log nodes no definition watches, key rows without an entry or with a stage that differs from their entry's, and privacy violations (including a server where `log_parameter_max_length_on_error` cannot be set to 0). `Happenv\ModelSearch\Postgres\Doctor\Doctor::inspect()` returns the same findings for your own alerting. Its key checks are bounded by `doctor.timeout_ms`.
+
+`inspect()` returns a `list<Happenv\ModelSearch\Postgres\Doctor\Finding>` (empty when all is well). A `Finding` is a readonly value object with `string $code`, `string $message` (names types, tables, indexes and settings, never a phrase or a record's value) and `?string $subject`. There is no severity: the host decides what each code is worth. Several findings may share a code and a subject (or have none), so do not key a map by subject.
+
+| Code | `subject` |
+| --- | --- |
+| `tables-missing` | `null` |
+| `lag` | `null` |
+| `index-missing`, `index-invalid`, `index-drift` | the index name |
+| `trigger-drift` | the table |
+| `type-not-installed`, `fingerprint-differs`, `type-not-ready`, `infix-ignored` | the type (morph alias) |
+| `failures` | the type |
+| `unknown-nodes` | the node type no definition watches |
+| `scan-timed-out`, `scan-failed` | `null` |
+| `keys-without-entry`, `key-stage-drift` | the type |
+| `privacy` | the setting (`log_parameter_max_length_on_error`) when it cannot be set to 0; `null` for a logging violation |
+
+The codes are part of the public API: new codes may appear in minor releases, and an existing code is not renamed or removed before a major release.
+
+```php
+use Happenv\ModelSearch\Postgres\Doctor\Doctor;
+use Happenv\ModelSearch\Postgres\Doctor\Finding;
+
+$byCode = collect(app(Doctor::class)->inspect())
+    ->groupBy(static fn (Finding $finding): string => $finding->code);
+
+foreach ($byCode as $code => $findings) {
+    // Alert per code; $findings->pluck('message')->all() lists every message, including those without a subject.
+}
+```
 
 ## Known limits
 

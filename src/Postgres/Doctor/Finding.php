@@ -9,14 +9,12 @@ namespace Happenv\ModelSearch\Postgres\Doctor;
  *
  * The message names types, tables, indexes and settings and carries counts; it never carries a
  * phrase or a record's value.
- *
- * @internal
  */
 final readonly class Finding
 {
     /**
-     * @param  string  $code  Stable, for the host to route on (`lag`, `index-missing`, `privacy`, ...).
-     * @param  string|null  $subject  The type, index or setting the finding is about.
+     * @param  string  $code  Stable and public: new codes may appear in a minor release, an existing one is not renamed before a major. Hosts route on it.
+     * @param  string|null  $subject  The type, index, table, node type or setting the finding is about; null when it is about none (`tables-missing`, `lag`, `scan-*`, a logging `privacy` violation).
      */
     public function __construct(public string $code, public string $message, public ?string $subject = null) {}
 }
