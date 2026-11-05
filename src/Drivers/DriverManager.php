@@ -6,6 +6,9 @@ namespace Happenv\ModelSearch\Drivers;
 
 use Closure;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
+use Happenv\ModelSearch\Postgres\Query\PostgresDriver;
+use Happenv\ModelSearch\Query\SearchQuery;
+use Happenv\ModelSearch\Query\SearchResults;
 use InvalidArgumentException;
 
 /**
@@ -35,7 +38,43 @@ final class DriverManager
 
         return match ($name) {
             'database' => new DatabaseDriver($definition),
+            'postgres' => new PostgresDriver($definition),
             default => throw new InvalidArgumentException(sprintf('The search driver "%s" is not available.', $name)),
         };
+    }
+
+    /**
+     * Runs the queries of a palette: the ones served by the `postgres` driver together, in one
+     * statement, every other driver's queries one by one.
+     *
+     * @param  list<SearchQuery>  $queries
+     * @return array<string, SearchResults> By morph alias, in the order of the queries.
+     */
+    public function palette(array $queries): array
+    {
+        $results = [];
+        $together = [];
+        $postgres = null;
+
+        foreach ($queries as $query) {
+            $alias = $query->definition()->morphAlias;
+            $driver = $this->for($query->definition());
+            $results[$alias] = null;
+
+            if ($driver instanceof PostgresDriver) {
+                $postgres ??= $driver;
+                $together[] = $query;
+
+                continue;
+            }
+
+            $results[$alias] = $driver->get($query);
+        }
+
+        if ($postgres instanceof PostgresDriver) {
+            $results = [...$results, ...$postgres->palette($together)];
+        }
+
+        return array_filter($results, static fn (?SearchResults $outcome): bool => $outcome instanceof SearchResults);
     }
 }

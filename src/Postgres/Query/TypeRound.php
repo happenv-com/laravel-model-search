@@ -1,0 +1,73 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Happenv\ModelSearch\Postgres\Query;
+
+use Happenv\ModelSearch\Query\SearchResults;
+
+/**
+ * What round one found for one type: its best `limit` records, ranked, and the counts the driver
+ * keeps to itself. They describe the pool the type was read from, which says something about rows
+ * the viewer may not see, so they never reach {@see SearchResults}.
+ *
+ * @internal
+ */
+final readonly class TypeRound
+{
+    /**
+     * @param  list<CandidateRow>  $rows  Ranked, at most `limit` of them.
+     * @param  int  $passed  Records that passed authorization and the stage selection.
+     * @param  int  $nonExactInStageZero  Authorized records of the first stage whose best hit is not an exact one.
+     * @param  bool  $stageZeroFull  A branch of the first stage returned `pool + 1` rows.
+     * @param  bool  $anyFull  A branch that counts for the first stage, or no stage at all, returned `pool + 1` rows.
+     * @param  bool  $allStagesFull  A branch of all stages (of a type with stages, not exact) returned `pool + 1` rows.
+     */
+    public function __construct(
+        public array $rows,
+        public int $passed,
+        public int $nonExactInStageZero,
+        public bool $stageZeroFull,
+        public bool $anyFull,
+        public bool $allStagesFull,
+        public int $limit,
+    ) {}
+
+    public static function empty(int $limit): self
+    {
+        return new self([], 0, 0, false, false, false, $limit);
+    }
+
+    /**
+     * Fewer records than the limit passed authorization.
+     */
+    public function underfilled(): bool
+    {
+        return $this->passed < $this->limit;
+    }
+
+    /**
+     * A branch of the first stage ran into the end of its pool.
+     */
+    public function stageZeroTruncated(): bool
+    {
+        return $this->stageZeroFull;
+    }
+
+    /**
+     * A branch that decided the outcome ran into the end of its pool. A full branch of all stages
+     * counts only when stage zero did not answer.
+     */
+    public function truncated(): bool
+    {
+        return $this->anyFull || ($this->allStagesFull && $this->nonExactInStageZero === 0 && ! $this->stageZeroFull);
+    }
+
+    /**
+     * Whether the first stage answered with something besides exact hits.
+     */
+    public function answeredByStageZero(): bool
+    {
+        return $this->nonExactInStageZero > 0;
+    }
+}

@@ -114,3 +114,17 @@ it('treats a kind the definition does not know as hidden', function (): void {
 
     expect((new RevealPolicy($definition))->apply(revealMatch('mystery', 'v'), new Order, null)->value)->toBeNull();
 });
+
+it('asks only the name fields that match by prefix about a name word', function (): void {
+    $word = revealMatch('name_word', 'Jan Kowalski');
+    $deny = static fn (): bool => false;
+
+    $fuzzyOnlyDenies = revealDefinition([
+        SearchField::name('customer_name'),
+        SearchField::name('shippingAddress.name')->matches(Mode::Fuzzy)->revealUsing($deny),
+    ]);
+    $noPrefixName = revealDefinition([SearchField::name('customer_name')->matches(Mode::Fuzzy)]);
+
+    expect((new RevealPolicy($fuzzyOnlyDenies))->apply($word, new Order, null)->value)->toBe('Jan Kowalski')
+        ->and((new RevealPolicy($noPrefixName))->apply($word, new Order, null)->value)->toBeNull();
+});

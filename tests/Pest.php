@@ -10,8 +10,10 @@ use Happenv\ModelSearch\Tests\TestCase;
 uses(TestCase::class)->in(
     'Unit',
     'Feature/[!P]*',
+    'Feature/Postgres/CandidateBranchesTest.php',
     'Feature/Postgres/IndexPlanTest.php',
     'Feature/Postgres/IndexerTest.php',
+    'Feature/Postgres/PaletteRoundOneTest.php',
     'Feature/Postgres/PrivacyGateTest.php',
     'Feature/Postgres/SearchSessionNestedTest.php',
     'Feature/Postgres/TriggersTest.php',

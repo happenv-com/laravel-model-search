@@ -64,6 +64,8 @@ final class SearchQuery
 
     private ?int $matched = null;
 
+    private ?ChargeOnce $sharedCharge = null;
+
     /**
      * @param  class-string<Model>  $modelClass
      */
@@ -265,6 +267,58 @@ final class SearchQuery
     }
 
     /**
+     * Several models in one search: the palette. Every query is guarded and observed like a `get()`,
+     * and the registered drivers answer them together (the `postgres` driver in ONE statement).
+     *
+     * A `via` field whose parent model is searched in the same palette follows that query's own
+     * scope, unless the query was given a scope for that parent explicitly. The viewer's rate limit
+     * is charged once for the whole palette.
+     *
+     * @return array<string, SearchResults> By morph alias, in the order the queries were given.
+     *
+     * @throws SearchScopeMissing
+     * @throws InvalidArgumentException When two queries search the same model.
+     */
+    public static function palette(self ...$queries): array
+    {
+        if ($queries === []) {
+            return [];
+        }
+
+        $scopes = [];
+
+        foreach ($queries as $query) {
+            $query->guard();
+
+            if (isset($scopes[$query->modelClass])) {
+                throw new InvalidArgumentException('A palette holds one query per model.');
+            }
+
+            $scopes[$query->modelClass] = $query->host;
+        }
+
+        foreach ($queries as $query) {
+            $query->admit();
+        }
+
+        $parents = array_filter($scopes, static fn (?HostQuery $scope): bool => $scope instanceof HostQuery);
+        $prepared = array_values(array_map(
+            static fn (self $query): self => $query->withPaletteParents(array_diff_key($parents, [$query->modelClass => true])),
+            $queries,
+        ));
+
+        $started = hrtime(true);
+        $results = resolve(DriverManager::class)->palette($prepared);
+        $milliseconds = (int) round((hrtime(true) - $started) / 1_000_000);
+
+        foreach ($results as $alias => $outcome) {
+            Event::dispatch(new SearchPerformed((string) $alias, $milliseconds, count($outcome), $outcome->timedOut));
+        }
+
+        return $results;
+    }
+
+    /**
      * Charges the viewer's rate limit. A driver calls it once it knows it will run a query (a phrase
      * that normalises to nothing runs none and costs nothing), and before the first one.
      *
@@ -274,9 +328,69 @@ final class SearchQuery
      */
     public function charge(): void
     {
-        $model = new $this->modelClass;
+        $charge = function (): void {
+            $model = new $this->modelClass;
 
-        resolve(SearchRateLimit::class)->attempt($this->viewer(), $model->getConnection()->getDatabaseName());
+            resolve(SearchRateLimit::class)->attempt($this->viewer(), $model->getConnection()->getDatabaseName());
+        };
+
+        if ($this->sharedCharge instanceof ChargeOnce) {
+            $this->sharedCharge->once($charge);
+
+            return;
+        }
+
+        $charge();
+    }
+
+    /**
+     * The same query, whose {@see self::charge()} is shared with the other queries of a palette:
+     * whichever of them charges first pays for all, so one keystroke costs one attempt.
+     *
+     * @internal
+     */
+    public function sharingCharge(ChargeOnce $charge): self
+    {
+        return $this->evolve(function (self $query) use ($charge): void {
+            $query->sharedCharge = $charge;
+        });
+    }
+
+    /**
+     * The scope of the query, null for a search without one.
+     *
+     * @internal
+     */
+    public function hostScope(): ?HostQuery
+    {
+        return $this->host;
+    }
+
+    /**
+     * @internal
+     *
+     * @return class-string<Model>
+     */
+    public function modelClass(): string
+    {
+        return $this->modelClass;
+    }
+
+    /**
+     * The same query with the scopes of the other queries of a palette as parent scopes. A scope given
+     * explicitly to {@see self::within()} for the same parent model wins.
+     *
+     * @internal
+     *
+     * @param  array<class-string<Model>, HostQuery>  $parents
+     */
+    public function withPaletteParents(array $parents): self
+    {
+        return $this->evolve(function (self $query) use ($parents): void {
+            foreach ($parents as $parentClass => $scope) {
+                $query->parents[$parentClass] ??= $scope;
+            }
+        });
     }
 
     /**

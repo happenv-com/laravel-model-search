@@ -133,3 +133,16 @@ it('is not affected by later changes to the builder it was built from', function
 it('names the model of the host', function (): void {
     expect(HostQuery::from(Order::query())->model())->toBeInstanceOf(Order::class);
 });
+
+it('joins the values to the host as a condition of the join, whatever its top-level orWhere', function (): void {
+    $in = Order::create(['signature' => 'SRC-1', 'state' => 'unshipped']);
+    Order::create(['signature' => 'SRC-2', 'state' => 'cancelled']);
+    Order::create(['signature' => 'OTHER', 'state' => 'unshipped']);
+    $host = HostQuery::from(Order::query()->where('state', 'unshipped')->orWhere('state', 'partially_shipped'));
+
+    $statement = $host->equalingColumn('signature', ['SRC-1', 'SRC-2']);
+    $rows = DB::select($statement['sql'], $statement['bindings']);
+
+    expect($statement['sql'])->toContain('inner join')
+        ->and(array_map(static fn (object $row): array => [$row->search_key, $row->source_value], $rows))->toBe([[$in->id, 'SRC-1']]);
+});

@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Query;
 
+use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Exceptions\UnsupportedHostQuery;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Query\Builder as QueryBuilder;
+use Illuminate\Database\Query\JoinClause;
 use Illuminate\Support\Collection;
 
 /**
@@ -57,6 +59,35 @@ final readonly class HostQuery
         $statement = $builder->applyScopes()->getQuery();
 
         return ['sql' => $statement->toSql(), 'bindings' => $statement->getBindings()];
+    }
+
+    /**
+     * The records in scope whose own column equals one of the values, as `search_key` and
+     * `source_value`. The values join the query through `unnest(…)`, so a top-level `orWhere` of the
+     * host cannot widen the result: the phrase is a condition of the join, never of the `WHERE`.
+     *
+     * @param  list<string>  $values
+     * @param  array{column: string, value: string|int}|null  $partition  Kept as a condition of the join too.
+     * @return array{sql: string, bindings: list<mixed>}
+     */
+    public function equalingColumn(string $column, array $values, ?array $partition = null): array
+    {
+        $model = $this->builder->getModel();
+        $query = $this->builder->clone()->applyScopes()->getQuery();
+        $variants = $query->newQuery()->fromRaw('unnest(?::text[]) AS "source_variants"("variant")', [Sql::arrayLiteral($values)])->select('source_variants.variant');
+        $qualified = $model->qualifyColumn($column);
+
+        $query->select([$model->getQualifiedKeyName().' as '.self::KEY_ALIAS, $model->qualifyColumn($column).' as source_value']);
+        $partitionColumn = $partition === null ? null : $model->qualifyColumn($partition['column']);
+        $query->joinSub($variants, 'source_variants', static function (JoinClause $join) use ($qualified, $partition, $partitionColumn): void {
+            $join->whereColumn($qualified, '=', 'source_variants.variant');
+
+            if ($partition !== null && $partitionColumn !== null) {
+                $join->where($partitionColumn, '=', $partition['value']);
+            }
+        });
+
+        return ['sql' => $query->toSql(), 'bindings' => $query->getBindings()];
     }
 
     /**
