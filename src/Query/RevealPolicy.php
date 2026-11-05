@@ -1,0 +1,52 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Happenv\ModelSearch\Query;
+
+use Happenv\ModelSearch\Definition\CompiledDefinition;
+use Happenv\ModelSearch\Definition\CompiledField;
+use Happenv\ModelSearch\Definition\FieldType;
+use Happenv\ModelSearch\Definition\SearchField;
+use Illuminate\Database\Eloquent\Model;
+
+/**
+ * Applies the `revealUsing()` rules of a definition to a match: the matched value, and every
+ * alternative, is shown only if the field it came from allows the viewer to see it.
+ *
+ * A name word is a word of any name of the record, so it is revealed only when EVERY name field
+ * allows it. A kind the definition does not know is hidden.
+ */
+final readonly class RevealPolicy
+{
+    public function __construct(private CompiledDefinition $definition) {}
+
+    public function apply(SearchMatch $match, Model $model, mixed $viewer): SearchMatch
+    {
+        $alternatives = array_values(array_filter(
+            $match->alternatives,
+            fn (SearchMatch $alternative): bool => $this->allows($alternative->kind, $model, $viewer),
+        ));
+
+        return $match
+            ->withValue($this->allows($match->kind, $model, $viewer) ? $match->value : null)
+            ->withAlternatives($alternatives);
+    }
+
+    private function allows(string $kind, Model $model, mixed $viewer): bool
+    {
+        if ($kind === SearchField::RESERVED_KIND) {
+            $names = array_filter($this->definition->fields, static fn (CompiledField $field): bool => $field->type === FieldType::Name);
+
+            return $names !== [] && array_all($names, static fn ($field): bool => $field->reveal === null || (bool) ($field->reveal)($model, $viewer));
+        }
+
+        foreach ($this->definition->fields as $field) {
+            if ($field->kind === $kind) {
+                return $field->reveal === null || (bool) ($field->reveal)($model, $viewer);
+            }
+        }
+
+        return false;
+    }
+}

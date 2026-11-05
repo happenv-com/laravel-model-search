@@ -31,6 +31,8 @@ final class ConfigurableOrderSearch extends ModelSearch
 
     public static string $stageLabel = 'Open';
 
+    public static ?string $sortAt = null;
+
     public static int $definitionVersion = 1;
 
     public static function reset(): void
@@ -40,6 +42,7 @@ final class ConfigurableOrderSearch extends ModelSearch
         self::$constraint = null;
         self::$watching = ['state'];
         self::$stageLabel = 'Open';
+        self::$sortAt = null;
         self::$definitionVersion = 1;
     }
 
@@ -64,6 +67,11 @@ final class ConfigurableOrderSearch extends ModelSearch
                 ->label(Closure::fromCallable(static fn (): string => $label)),
             SearchStage::all(),
         ];
+    }
+
+    public function sortAt(): ?string
+    {
+        return self::$sortAt;
     }
 
     public function version(): int

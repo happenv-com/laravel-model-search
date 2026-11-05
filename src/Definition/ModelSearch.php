@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Definition;
 
 use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
+use Happenv\ModelSearch\Query\SearchQuery;
 use Illuminate\Database\Eloquent\Model;
 use ReflectionClass;
 
@@ -68,6 +69,14 @@ abstract class ModelSearch
     public function withScopes(): array
     {
         return [];
+    }
+
+    /**
+     * Starts a search of this definition's model for a phrase typed by a user.
+     */
+    final public static function query(#[\SensitiveParameter] string $phrase): SearchQuery
+    {
+        return new SearchQuery(self::model(), $phrase);
     }
 
     /**

@@ -9,7 +9,6 @@ use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Compilation\WatchedTable;
 use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Query\Expression;
 
 final readonly class CompiledDefinition
 {
@@ -116,22 +115,13 @@ final readonly class CompiledDefinition
         $cases = '';
 
         foreach ($this->stages as $position => $stage) {
-            $constraint = $stage->constraint;
-
-            if (! $constraint instanceof \Closure) {
+            if ($stage->isAll()) {
                 continue;
             }
 
-            $inner = $model->newQueryWithoutScopes();
-            $inner->selectRaw('1');
-            $inner->whereColumn(new Expression('"u"."id"'), '=', $model->getQualifiedKeyName());
-            $inner->where(static function ($query) use ($constraint): void {
-                $constraint($query);
-            });
-
-            $base = $inner->getQuery();
-            $cases .= sprintf(' WHEN EXISTS (%s) THEN %d', $base->toSql(), $position);
-            array_push($bindings, ...$base->getBindings());
+            $exists = $this->stageExists($stage, 'u.id');
+            $cases .= sprintf(' WHEN %s THEN %d', $exists['sql'], $position);
+            array_push($bindings, ...$exists['bindings']);
         }
 
         $stage = $cases === '' ? sprintf('%d', self::ALL_STAGE) : sprintf('CASE%s ELSE %d END', $cases, self::ALL_STAGE);
@@ -146,5 +136,46 @@ final readonly class CompiledDefinition
             ),
             'bindings' => [...$bindings, Sql::arrayLiteral($rootIds)],
         ];
+    }
+
+    /**
+     * The one stage that narrows the model's query, besides the final "all" stage.
+     */
+    public function constrainedStage(): ?SearchStage
+    {
+        foreach ($this->stages as $stage) {
+            if (! $stage->isAll()) {
+                return $stage;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * `EXISTS (…)` for one constrained stage, true when the record whose key is in the column
+     * `$keyColumn` (`alias.column`, already of the key column's type) falls in the stage.
+     *
+     * @return array{sql: string, bindings: list<mixed>}
+     */
+    public function stageExists(SearchStage $stage, string $keyColumn): array
+    {
+        $constraint = $stage->constraint;
+
+        if (! $constraint instanceof \Closure) {
+            throw new InvalidSearchDefinition('The final "all" stage has no constraint to test.');
+        }
+
+        $model = new ($this->modelClass);
+        $inner = $model->newQueryWithoutScopes();
+        $inner->selectRaw('1');
+        $inner->whereColumn($keyColumn, '=', $model->getQualifiedKeyName());
+        $inner->where(static function ($query) use ($constraint): void {
+            $constraint($query);
+        });
+
+        $base = $inner->getQuery();
+
+        return ['sql' => 'EXISTS ('.$base->toSql().')', 'bindings' => $base->getBindings()];
     }
 }

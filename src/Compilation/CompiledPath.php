@@ -28,11 +28,12 @@ final readonly class CompiledPath
 
     /**
      * The (root_id, value) pairs of the given roots, read straight from the source tables.
+     * `null` reads every root (a scan, for callers that filter on the value instead).
      *
-     * @param  list<string|int>  $rootIds
+     * @param  list<string|int>|null  $rootIds
      * @return array{sql: string, bindings: list<mixed>}
      */
-    public function contributionSql(array $rootIds): array
+    public function contributionSql(?array $rootIds): array
     {
         $chain = JoinChain::render($this->root, $this->steps, true);
         $alias = $this->steps === [] ? 'r' : 't'.count($this->steps);
@@ -49,7 +50,7 @@ final readonly class CompiledPath
             $value = $source;
         }
 
-        $where = [Sql::anyOf(JoinChain::column('r', $this->root->keyColumn), $this->root->keyType)];
+        $where = $rootIds === null ? [] : [Sql::anyOf(JoinChain::column('r', $this->root->keyColumn), $this->root->keyType)];
 
         if ($this->root->softDeleteColumn !== null) {
             $where[] = JoinChain::column('r', $this->root->softDeleteColumn).' IS NULL';
@@ -65,7 +66,7 @@ final readonly class CompiledPath
                 $from,
                 implode(' AND ', $where),
             ),
-            'bindings' => [...$chain['bindings'], Sql::arrayLiteral($rootIds)],
+            'bindings' => [...$chain['bindings'], ...($rootIds === null ? [] : [Sql::arrayLiteral($rootIds)])],
         ];
     }
 
