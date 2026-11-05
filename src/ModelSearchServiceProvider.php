@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch;
 
+use Happenv\ModelSearch\Console\DrainCommand;
+use Happenv\ModelSearch\Console\RebuildCommand;
+use Happenv\ModelSearch\Console\RetryFailuresCommand;
 use Happenv\ModelSearch\Console\SyncCommand;
 use Happenv\ModelSearch\Drivers\DriverManager;
 use Happenv\ModelSearch\Listeners\SyncAfterMigrations;
@@ -30,7 +33,7 @@ final class ModelSearchServiceProvider extends ServiceProvider
         Event::listen(MigrationsEnded::class, SyncAfterMigrations::class);
 
         if ($this->app->runningInConsole()) {
-            $this->commands([SyncCommand::class]);
+            $this->commands([SyncCommand::class, DrainCommand::class, RebuildCommand::class, RetryFailuresCommand::class]);
         }
 
         $this->publishes([

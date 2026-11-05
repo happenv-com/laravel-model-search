@@ -11,5 +11,6 @@ uses(TestCase::class)->in(
     'Unit',
     'Feature/[!P]*',
     'Feature/Postgres/IndexPlanTest.php',
+    'Feature/Postgres/IndexerTest.php',
     'Feature/Postgres/TriggersTest.php',
 );
