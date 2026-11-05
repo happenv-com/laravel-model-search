@@ -7,8 +7,8 @@ Universal record search for Laravel models, backed by PostgreSQL trigram indexes
 ## Requirements
 
 - PHP 8.4+
-- Laravel 12 or 13
-- PostgreSQL with the `pg_trgm` extension
+- Laravel 13
+- PostgreSQL 18+ with the `pg_trgm` extension
 
 ## Installation
 
