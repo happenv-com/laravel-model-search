@@ -68,3 +68,13 @@ it('term observer sees every term', function (): void {
 it('observes nothing by default', function (): void {
     expect(resolve(SearchTermObserver::class))->toBeInstanceOf(NullSearchTermObserver::class);
 });
+
+it('reports apply with the number of ids found', function (): void {
+    Order::create(['signature' => 'APPLY-1', 'state' => 'unshipped']);
+    Order::create(['signature' => 'APPLY-2', 'state' => 'unshipped']);
+    Event::fake([SearchPerformed::class]);
+
+    OrderSearch::query('APPLY')->within(Order::query())->apply(Order::query());
+
+    Event::assertDispatched(SearchPerformed::class, static fn (SearchPerformed $event): bool => $event->resultCount === 2);
+});

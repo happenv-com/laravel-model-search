@@ -62,6 +62,8 @@ final class SearchQuery
 
     private ?string $locale = null;
 
+    private ?int $matched = null;
+
     /**
      * @param  class-string<Model>  $modelClass
      */
@@ -237,8 +239,9 @@ final class SearchQuery
         }
 
         $this->admit();
+        $this->matched = null;
 
-        return $this->driver()->apply($this, $tableQuery);
+        return $this->performed(fn (): Builder => $this->driver()->apply($this, $tableQuery), fn (): int => $this->matched ?? 0, static fn (): bool => false);
     }
 
     /**
@@ -259,6 +262,31 @@ final class SearchQuery
         $this->admit();
 
         return $this->performed(fn (): Collection => $this->driver()->candidates($this), static fn (Collection $candidates): int => $candidates->count(), static fn (): bool => false);
+    }
+
+    /**
+     * Charges the viewer's rate limit. A driver calls it once it knows it will run a query (a phrase
+     * that normalises to nothing runs none and costs nothing), and before the first one.
+     *
+     * @internal
+     *
+     * @throws SearchRateLimited
+     */
+    public function charge(): void
+    {
+        $model = new $this->modelClass;
+
+        resolve(SearchRateLimit::class)->attempt($this->viewer(), $model->getConnection()->getDatabaseName());
+    }
+
+    /**
+     * A driver of `apply()` reports how many records the phrase matched, for {@see SearchPerformed}.
+     *
+     * @internal
+     */
+    public function matched(int $count): void
+    {
+        $this->matched = $count;
     }
 
     /**
@@ -407,14 +435,10 @@ final class SearchQuery
     }
 
     /**
-     * Charges the viewer's rate limit, which stops a search before any query, and hands the phrase to
-     * the host's observer.
-     *
-     * @throws SearchRateLimited
+     * Hands the phrase to the host's observer.
      */
     private function admit(): void
     {
-        resolve(SearchRateLimit::class)->attempt($this->viewer());
         resolve(SearchTermObserver::class)->observe($this->phrase);
     }
 

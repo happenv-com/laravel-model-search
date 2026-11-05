@@ -10,7 +10,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Facades\Cache;
 
 /**
- * One bucket per viewer on Laravel's {@see RateLimiter}, configured by `model-search.rate_limit`:
+ * One bucket per viewer and database on Laravel's {@see RateLimiter}, configured by `model-search.rate_limit`:
  * `['max_attempts' => 30, 'decay_seconds' => 10]` (or the pair `[30, 10]`); `false`, `null` or a
  * maximum below 1 turns it off.
  *
@@ -22,7 +22,7 @@ final class SearchRateLimit
     /**
      * @throws SearchRateLimited Before any query is run.
      */
-    public function attempt(?Authenticatable $viewer): void
+    public function attempt(?Authenticatable $viewer, string $database = ''): void
     {
         [$maxAttempts, $decaySeconds] = $this->limits();
 
@@ -30,7 +30,7 @@ final class SearchRateLimit
             return;
         }
 
-        $key = 'model-search:search:'.sha1($viewer::class.'|'.$viewer->getAuthIdentifier());
+        $key = 'model-search:search:'.sha1($database.'|'.$viewer::class.'|'.$viewer->getAuthIdentifier());
         $limiter = $this->limiter();
 
         if ($limiter->tooManyAttempts($key, $maxAttempts)) {

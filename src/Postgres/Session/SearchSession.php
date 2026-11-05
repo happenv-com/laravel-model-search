@@ -4,16 +4,19 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Postgres\Session;
 
+use ArrayObject;
 use Closure;
 use Happenv\ModelSearch\Events\SearchPrivacyUnsafe;
 use Happenv\ModelSearch\Exceptions\SearchFailed;
 use Happenv\ModelSearch\Exceptions\SearchPrivacyUnavailable;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Illuminate\Database\Connection;
+use Illuminate\Database\DeadlockException;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Event;
 use PDO;
 use Pdo\Pgsql;
+use PDOException;
 use Throwable;
 
 /**
@@ -35,13 +38,25 @@ use Throwable;
  * - turns a statement timeout into {@see SearchTimedOut} and any other database failure into
  *   {@see SearchFailed}, whose message and trace carry neither the SQL nor the phrase.
  *
- * Run inside the caller's transaction, the settings are put back afterwards, because `SET LOCAL`
- * outlives a released savepoint. On another database there is no session to configure and the
- * work just runs.
+ * The transaction is issued by hand (`BEGIN`/`COMMIT`, or `SAVEPOINT model_search` inside the host's
+ * transaction), never with `Connection::transaction()`: that path rethrows a deadlock as a
+ * `DeadlockException` carrying the SQL and its bindings, and with them the phrase. Every database
+ * failure is classified by SQLSTATE (never by message text) and rethrown as a new exception with no
+ * `previous`: 57014 is {@see SearchTimedOut}, a genuine 40001/40P01 inside the host's transaction is
+ * a new phrase-free `DeadlockException` (so the host's own retry still works), anything else is
+ * {@see SearchFailed}. A failed search is rolled back to its savepoint, so the host's transaction
+ * stays usable.
+ *
+ * Inside the host's transaction the settings are put back afterwards, because `SET LOCAL` outlives a
+ * released savepoint. The session is the host's own (ruling R16, see {@see SearchConnectionFactory}):
+ * it sees the host's uncommitted rows and, under read/write splitting, the search runs on the
+ * primary. On another database there is no session to configure and the work just runs.
  */
 final class SearchSession
 {
     private const string TIMEOUT_STATE = '57014';
+
+    private const string SAVEPOINT = 'model_search';
 
     /**
      * @template TResult
@@ -54,21 +69,28 @@ final class SearchSession
      * @throws SearchPrivacyUnavailable
      * @throws SearchTimedOut
      * @throws SearchFailed
+     * @throws DeadlockException
      */
     public function run(string $hostConnection, int $timeoutMs, Closure $fn): mixed
     {
         $connection = resolve(SearchConnectionFactory::class)->make($hostConnection);
+        $announcements = new ArrayObject;
 
         try {
-            return $connection->getDriverName() === 'pgsql'
-                ? $this->onPostgres($connection, $timeoutMs, $fn)
-                : $fn($connection);
-        } catch (QueryException $exception) {
-            $state = (string) $exception->getCode();
+            if ($connection->getDriverName() !== 'pgsql') {
+                return $fn($connection);
+            }
 
-            throw $state === self::TIMEOUT_STATE
-                ? new SearchTimedOut('The search ran out of time.')
-                : new SearchFailed(sprintf('The search statement failed (SQLSTATE %s).', $state));
+            return $this->onPostgres($connection, $timeoutMs, $fn, $announcements);
+        } catch (SearchPrivacyUnavailable|SearchTimedOut|SearchFailed $exception) {
+            throw $exception;
+        } catch (PDOException|QueryException $exception) {
+            throw $this->withoutDetails($exception, $connection);
+        } finally {
+            // Outside the search transaction: a listener may write to the database.
+            foreach ($announcements as $announce) {
+                $announce();
+            }
         }
     }
 
@@ -76,25 +98,20 @@ final class SearchSession
      * @template TResult
      *
      * @param  Closure(Connection): TResult  $fn
+     * @param  ArrayObject<int, Closure(): void>  $announcements  Events to dispatch once the search transaction has ended.
      * @return TResult
      */
-    private function onPostgres(Connection $connection, int $timeoutMs, Closure $fn): mixed
+    private function onPostgres(Connection $connection, int $timeoutMs, Closure $fn, ArrayObject $announcements): mixed
     {
         $pdo = $connection->getPdo();
         $emulated = $pdo->getAttribute(PDO::ATTR_EMULATE_PREPARES);
         $withoutPrepares = $pdo->getAttribute(Pgsql::ATTR_DISABLE_PREPARES);
-        $pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
-        $pdo->setAttribute(Pgsql::ATTR_DISABLE_PREPARES, true);
 
         try {
-            $gate = resolve(PrivacyGate::class);
-            $verdict = $gate->verdict($connection);
+            $pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+            $pdo->setAttribute(Pgsql::ATTR_DISABLE_PREPARES, true);
 
-            if (! $verdict->isSafe() && $gate->refuses()) {
-                throw new SearchPrivacyUnavailable($verdict->violations);
-            }
-
-            return $this->inTransaction($connection, $verdict->effectiveTimeout($timeoutMs), $gate->refuses(), $fn);
+            return $this->inTransaction($connection, $pdo, $timeoutMs, $fn, $announcements);
         } finally {
             $pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, $emulated);
             $pdo->setAttribute(Pgsql::ATTR_DISABLE_PREPARES, $withoutPrepares);
@@ -105,26 +122,64 @@ final class SearchSession
      * @template TResult
      *
      * @param  Closure(Connection): TResult  $fn
+     * @param  ArrayObject<int, Closure(): void>  $announcements  Events to dispatch once the search transaction has ended.
      * @return TResult
      */
-    private function inTransaction(Connection $connection, int $timeoutMs, bool $refuses, Closure $fn): mixed
+    private function inTransaction(Connection $connection, PDO $pdo, int $timeoutMs, Closure $fn, ArrayObject $announcements): mixed
     {
-        $previous = $connection->transactionLevel() > 0 ? $this->current($connection) : null;
+        $nested = $pdo->inTransaction();
+        $pdo->exec($nested ? 'SAVEPOINT '.self::SAVEPOINT : 'BEGIN');
 
         try {
-            return $connection->transaction(function () use ($connection, $timeoutMs, $refuses, $fn): mixed {
-                $this->configure($connection, $timeoutMs, $refuses);
+            $previous = $nested ? $this->current($connection) : null;
+            $gate = resolve(PrivacyGate::class);
+            [$verdict, $fresh] = $gate->read($connection);
+            $refuses = $gate->refuses();
 
-                return $fn($connection);
-            });
-        } finally {
+            if ($fresh && ! $verdict->isSafe()) {
+                $announcements[] = static fn () => $gate->announce($verdict);
+            }
+
+            if (! $verdict->isSafe() && $refuses) {
+                throw new SearchPrivacyUnavailable($verdict->violations);
+            }
+
+            $this->configure($connection, $verdict->effectiveTimeout($timeoutMs), $refuses, $announcements);
+            $result = $fn($connection);
+
             if ($previous !== null) {
                 $this->restore($connection, $previous);
             }
+
+            $pdo->exec($nested ? 'RELEASE SAVEPOINT '.self::SAVEPOINT : 'COMMIT');
+
+            return $result;
+        } catch (Throwable $exception) {
+            $this->abandon($pdo, $nested);
+
+            throw $exception;
         }
     }
 
-    private function configure(Connection $connection, int $timeoutMs, bool $refuses): void
+    private function abandon(PDO $pdo, bool $nested): void
+    {
+        try {
+            if ($nested) {
+                // The rollback also puts back every `SET LOCAL` the search made.
+                $pdo->exec('ROLLBACK TO SAVEPOINT '.self::SAVEPOINT);
+                $pdo->exec('RELEASE SAVEPOINT '.self::SAVEPOINT);
+            } else {
+                $pdo->exec('ROLLBACK');
+            }
+        } catch (Throwable) {
+            // The connection is gone; there is nothing left to put back.
+        }
+    }
+
+    /**
+     * @param  ArrayObject<int, Closure(): void>  $announcements  Events to dispatch once the search transaction has ended.
+     */
+    private function configure(Connection $connection, int $timeoutMs, bool $refuses, ArrayObject $announcements): void
     {
         $threshold = config('model-search.word_similarity_threshold', 0.5);
         $threshold = is_numeric($threshold) && $threshold >= 0 && $threshold <= 1 ? (float) $threshold : 0.5;
@@ -141,11 +196,48 @@ final class SearchSession
         }
 
         $violations = ['log_parameter_max_length_on_error could not be set to 0: a failed search could log its phrase'];
-        Event::dispatch(new SearchPrivacyUnsafe($violations, $refuses));
+        $announcements[] = static function () use ($violations, $refuses): void {
+            Event::dispatch(new SearchPrivacyUnsafe($violations, $refuses));
+        };
 
         if ($refuses) {
             throw new SearchPrivacyUnavailable($violations);
         }
+    }
+
+    /**
+     * Turns a database failure into an exception that holds neither the SQL nor its bindings, by
+     * SQLSTATE, with no `previous`.
+     */
+    private function withoutDetails(Throwable $exception, Connection $connection): Throwable
+    {
+        $state = $this->stateOf($exception);
+
+        if ($state === self::TIMEOUT_STATE) {
+            return new SearchTimedOut('The search ran out of time.');
+        }
+
+        // A deadlock or serialization failure inside the host's own transaction is the host's to retry.
+        if (in_array($state, ['40001', '40P01'], true) && $connection->getPdo()->inTransaction()) {
+            return new DeadlockException('The search was chosen as the victim of a deadlock or serialization failure.');
+        }
+
+        return new SearchFailed(sprintf('The search statement failed (SQLSTATE %s).', $state));
+    }
+
+    private function stateOf(Throwable $exception): string
+    {
+        for ($current = $exception; $current !== null; $current = $current->getPrevious()) {
+            if ($current instanceof PDOException && isset($current->errorInfo[0]) && is_string($current->errorInfo[0])) {
+                return $current->errorInfo[0];
+            }
+
+            if ($current instanceof QueryException && preg_match('/^[0-9A-Z]{5}$/', (string) $current->getCode()) === 1) {
+                return (string) $current->getCode();
+            }
+        }
+
+        return (string) $exception->getCode();
     }
 
     /**
@@ -172,12 +264,8 @@ final class SearchSession
      */
     private function restore(Connection $connection, array $values): void
     {
-        try {
-            foreach ($values as $name => $value) {
-                $connection->selectOne('SELECT set_config(?, ?, true)', [$name, $value]);
-            }
-        } catch (Throwable) {
-            // The caller's transaction was aborted; the settings die with it.
+        foreach ($values as $name => $value) {
+            $connection->selectOne('SELECT set_config(?, ?, true)', [$name, $value]);
         }
     }
 }

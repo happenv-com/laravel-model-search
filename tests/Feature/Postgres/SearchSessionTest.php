@@ -14,6 +14,7 @@ use Happenv\ModelSearch\Tests\TruncationTestCase;
 use Illuminate\Database\Connection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Str;
 use Pdo\Pgsql;
 
 uses(TruncationTestCase::class);
@@ -173,4 +174,26 @@ it('rethrows a failing statement without its text', function (): void {
     expect($caught)->toBeInstanceOf(SearchFailed::class)
         ->and($caught->getMessage())->not->toContain($phrase)->not->toContain('no_such_table')
         ->and($caught->getPrevious())->toBeNull();
+});
+
+it('reads the same server the search runs on', function (): void {
+    $connection = app(SearchConnectionFactory::class)->make('pgsql');
+
+    expect($connection->getReadPdo())->toBe($connection->getPdo());
+});
+
+it('dispatches the privacy event after the search transaction ended', function (): void {
+    DB::statement("SET log_statement = 'all'");
+    DB::table('orders')->where('signature', 'EVENT-WRITE')->delete();
+    Event::listen(SearchPrivacyUnsafe::class, static function (): void {
+        DB::table('orders')->insert(['id' => (string) Str::uuid(), 'signature' => 'EVENT-WRITE', 'state' => 'unshipped']);
+    });
+
+    try {
+        ssRun(300, static fn (): string => 'never');
+    } catch (SearchPrivacyUnavailable) {
+    }
+
+    expect(DB::table('orders')->where('signature', 'EVENT-WRITE')->count())->toBe(1);
+    DB::table('orders')->where('signature', 'EVENT-WRITE')->delete();
 });

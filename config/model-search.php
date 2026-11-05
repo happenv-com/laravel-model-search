@@ -26,5 +26,6 @@ return [
     ],
     'apply' => ['max_ids' => 10000],
     'lag_alarm_seconds' => 300,
+    'doctor' => ['timeout_ms' => 60000],
     'rate_limit' => ['max_attempts' => 30, 'decay_seconds' => 10],
 ];

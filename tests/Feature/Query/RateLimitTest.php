@@ -85,3 +85,25 @@ it('reads the pair form of the setting', function (): void {
 
     expect(static fn () => rlSearch(6))->toThrow(SearchRateLimited::class);
 });
+
+it('charges the limit only when a query actually runs', function (): void {
+    config(['model-search.rate_limit' => [1, 60]]);
+    $user = new GenericUser(['id' => 11]);
+
+    foreach (range(1, 3) as $attempt) {
+        OrderSearch::query('   ')->forUser($user)->within(Order::query())->get();
+    }
+
+    expect(static fn () => OrderSearch::query('ABC')->forUser($user)->within(Order::query())->get())->not->toThrow(SearchRateLimited::class);
+});
+
+it('keeps buckets of different databases apart', function (): void {
+    config(['model-search.rate_limit' => [1, 60]]);
+    $user = new GenericUser(['id' => 12]);
+    $limit = resolve(SearchRateLimit::class);
+
+    $limit->attempt($user, 'tenant_a');
+    $limit->attempt($user, 'tenant_b');
+
+    expect(static fn () => $limit->attempt($user, 'tenant_a'))->toThrow(SearchRateLimited::class);
+});

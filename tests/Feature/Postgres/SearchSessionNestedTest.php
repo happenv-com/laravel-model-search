@@ -2,8 +2,11 @@
 
 declare(strict_types=1);
 
+use Happenv\ModelSearch\Exceptions\SearchFailed;
+use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Postgres\Session\SearchSession;
 use Illuminate\Database\Connection;
+use Illuminate\Database\DeadlockException;
 use Illuminate\Support\Facades\DB;
 
 covers(SearchSession::class);
@@ -35,4 +38,80 @@ it('sees the callers uncommitted rows', function (): void {
     $seen = app(SearchSession::class)->run('pgsql', 100, static fn (Connection $connection): int => (int) $connection->selectOne('SELECT id FROM session_visibility')->id);
 
     expect($seen)->toBe(7);
+});
+
+/**
+ * Everything a leaked phrase could hide in: messages, string arguments of trace frames, the previous chain.
+ */
+function nsLeaks(Throwable $exception, string $phrase): bool
+{
+    for ($current = $exception; $current !== null; $current = $current->getPrevious()) {
+        if (str_contains($current->getMessage(), $phrase) || str_contains($current->getTraceAsString(), $phrase)) {
+            return true;
+        }
+
+        foreach ($current->getTrace() as $frame) {
+            foreach ($frame['args'] ?? [] as $argument) {
+                if (is_string($argument) && str_contains($argument, $phrase)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+it('turns a timeout inside a host transaction into SearchTimedOut without the phrase and keeps the transaction usable', function (): void {
+    $phrase = 'deadlock detected SECRETPHRASE';
+    $caught = null;
+
+    try {
+        app(SearchSession::class)->run('pgsql', 30, static fn (Connection $connection): array => $connection->select('SELECT pg_sleep(2) WHERE ? <> \'\'', [$phrase]));
+    } catch (Throwable $exception) {
+        $caught = $exception;
+    }
+
+    expect($caught)->toBeInstanceOf(SearchTimedOut::class)
+        ->and($caught->getPrevious())->toBeNull()
+        ->and(nsLeaks($caught, $phrase))->toBeFalse()
+        ->and((int) DB::selectOne('SELECT 1 AS one')->one)->toBe(1)
+        ->and(DB::transactionLevel())->toBe(1);
+});
+
+it('rethrows a genuine deadlock inside a host transaction as a new phrase free DeadlockException', function (): void {
+    $phrase = 'SECRETPHRASE';
+    DB::statement("CREATE FUNCTION pg_temp.boom(text) RETURNS int LANGUAGE plpgsql AS \$\$ BEGIN RAISE EXCEPTION 'deadlock detected %', \$1 USING ERRCODE = '40P01'; END \$\$");
+    $caught = null;
+
+    try {
+        app(SearchSession::class)->run('pgsql', 300, static fn (Connection $connection): array => $connection->select('SELECT pg_temp.boom(?)', [$phrase]));
+    } catch (Throwable $exception) {
+        $caught = $exception;
+    }
+
+    expect($caught)->toBeInstanceOf(DeadlockException::class)
+        ->and($caught->getPrevious())->toBeNull()
+        ->and(nsLeaks($caught, $phrase))->toBeFalse()
+        ->and((int) DB::selectOne('SELECT 1 AS one')->one)->toBe(1);
+});
+
+it('classifies by SQLSTATE and not by message text', function (): void {
+    $phrase = 'SECRETPHRASE';
+    DB::statement("CREATE FUNCTION pg_temp.boom2(text) RETURNS int LANGUAGE plpgsql AS \$\$ BEGIN RAISE EXCEPTION 'deadlock detected %', \$1 USING ERRCODE = '22012'; END \$\$");
+
+    $run = static fn () => app(SearchSession::class)->run('pgsql', 300, static fn (Connection $connection): array => $connection->select('SELECT pg_temp.boom2(?)', [$phrase]));
+
+    expect($run)->toThrow(SearchFailed::class);
+});
+
+it('a beforeExecuting callback of the host never sees the phrase', function (): void {
+    $seen = [];
+    DB::connection()->beforeExecuting(static function (string $query, array $bindings) use (&$seen): void {
+        $seen[] = $query.json_encode($bindings);
+    });
+
+    app(SearchSession::class)->run('pgsql', 300, static fn (Connection $connection): array => $connection->select('SELECT ?::text AS value', ['SECRETPHRASE']));
+
+    expect(implode('', $seen))->not->toContain('SECRETPHRASE');
 });

@@ -12,11 +12,12 @@ use Happenv\ModelSearch\Postgres\Schema\SchemaChange;
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Postgres\Session\PrivacyGate;
+use Happenv\ModelSearch\Postgres\Session\PrivacyVerdict;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Illuminate\Database\Connection;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use stdClass;
-use Throwable;
 
 /**
  * Looks for everything that would make the search wrong or slow, and returns it as findings.
@@ -29,7 +30,8 @@ use Throwable;
  *   for the first, and the second is a mirrored column that must never drift);
  * - the database server could write a search phrase to its logs ({@see PrivacyGate}).
  *
- * The two scans over the key table read all of it; they run with parallel workers off.
+ * The key checks read the whole key table in one pass; they run with parallel workers off and a
+ * statement timeout of their own.
  */
 final readonly class Doctor
 {
@@ -163,42 +165,65 @@ final readonly class Doctor
     }
 
     /**
+     * One pass over the key table: key rows without an entry, key rows whose stage differs from
+     * their entry's, and a check that parameter logging can be switched off. Parallel workers are
+     * off and the pass has its own statement timeout (`model-search.doctor.timeout_ms`).
+     *
      * @return list<Finding>
      */
     private function keyScans(Connection $db): array
     {
         $keys = $this->names()->quoted($this->names()->keys());
         $entries = $this->names()->quoted($this->names()->entries());
+        $timeout = config('model-search.doctor.timeout_ms', 60000);
+        $timeout = is_int($timeout) && $timeout > 0 ? $timeout : 60000;
 
-        /** @var list<stdClass> $orphans */
-        $orphans = [];
-        /** @var list<stdClass> $drifted */
-        $drifted = [];
+        /** @var list<stdClass> $rows */
+        $rows = [];
+        $logged = null;
 
-        $db->transaction(function () use ($db, $keys, $entries, &$orphans, &$drifted): void {
-            $previous = $db->selectOne("SELECT current_setting('max_parallel_workers_per_gather') AS value")?->value;
-            $db->statement('SET LOCAL max_parallel_workers_per_gather = 0');
+        try {
+            $db->transaction(function () use ($db, $keys, $entries, $timeout, &$rows, &$logged): void {
+                $previous = $db->selectOne("SELECT current_setting('max_parallel_workers_per_gather') AS parallel, current_setting('statement_timeout') AS timeout");
 
-            try {
-                $orphans = $db->select(sprintf('SELECT k."subject_type", count(*) AS "keys" FROM %1$s k WHERE NOT EXISTS (SELECT 1 FROM %2$s e WHERE e."subject_type" = k."subject_type" AND e."subject_id" = k."subject_id") GROUP BY k."subject_type" ORDER BY k."subject_type"', $keys, $entries));
-                $drifted = $db->select(sprintf('SELECT k."subject_type", count(*) AS "keys" FROM %1$s k JOIN %2$s e ON e."subject_type" = k."subject_type" AND e."subject_id" = k."subject_id" WHERE k."stage" IS DISTINCT FROM e."stage" GROUP BY k."subject_type" ORDER BY k."subject_type"', $keys, $entries));
-            } finally {
-                // `SET LOCAL` outlives a released savepoint, so a caller's transaction gets its value back.
-                try {
-                    $db->selectOne("SELECT set_config('max_parallel_workers_per_gather', ?, true)", [is_string($previous) ? $previous : '2']);
-                } catch (Throwable) {
+                $db->statement('SET LOCAL max_parallel_workers_per_gather = 0');
+                $db->statement('SET LOCAL statement_timeout = '.$timeout);
+                $db->statement('SET LOCAL log_parameter_max_length_on_error = 0');
+                $logged = $db->selectOne("SELECT current_setting('log_parameter_max_length_on_error') AS value")?->value;
+
+                $rows = $db->select(sprintf(
+                    'SELECT k."subject_type", count(*) FILTER (WHERE e."subject_id" IS NULL) AS "orphans", count(*) FILTER (WHERE e."subject_id" IS NOT NULL AND k."stage" IS DISTINCT FROM e."stage") AS "drifted" FROM %1$s k LEFT JOIN %2$s e ON e."subject_type" = k."subject_type" AND e."subject_id" = k."subject_id" GROUP BY k."subject_type" ORDER BY k."subject_type"',
+                    $keys,
+                    $entries,
+                ));
+
+                // `SET LOCAL` outlives a released savepoint, so a caller's transaction gets its values back.
+                foreach (['max_parallel_workers_per_gather' => $previous->parallel ?? null, 'statement_timeout' => $previous->timeout ?? null] as $name => $value) {
+                    if (is_string($value)) {
+                        $db->selectOne('SELECT set_config(?, ?, true)', [$name, $value]);
+                    }
                 }
-            }
-        });
+            });
+        } catch (QueryException $exception) {
+            return [(string) $exception->getCode() === '57014'
+                ? new Finding('scan-timed-out', sprintf('The key checks did not finish within %d ms (model-search.doctor.timeout_ms).', $timeout))
+                : new Finding('scan-failed', sprintf('The key checks failed (SQLSTATE %s).', $exception->getCode()))];
+        }
 
         $findings = [];
 
-        foreach ($orphans as $row) {
-            $findings[] = new Finding('keys-without-entry', sprintf('%d key row(s) of %s have no entry; a rebuild of the type removes them.', $row->keys, $row->subject_type), (string) $row->subject_type);
+        if ($logged !== '0') {
+            $findings[] = new Finding('privacy', 'log_parameter_max_length_on_error cannot be set to 0 for a transaction: a failed search could log its phrase.', 'log_parameter_max_length_on_error');
         }
 
-        foreach ($drifted as $row) {
-            $findings[] = new Finding('key-stage-drift', sprintf('%d key row(s) of %s carry a stage other than their entry\'s; a rebuild of the type repairs them.', $row->keys, $row->subject_type), (string) $row->subject_type);
+        foreach ($rows as $row) {
+            if ((int) $row->orphans > 0) {
+                $findings[] = new Finding('keys-without-entry', sprintf('%d key row(s) of %s have no entry; a rebuild of the type removes them.', $row->orphans, $row->subject_type), (string) $row->subject_type);
+            }
+
+            if ((int) $row->drifted > 0) {
+                $findings[] = new Finding('key-stage-drift', sprintf('%d key row(s) of %s carry a stage other than their entry\'s; a rebuild of the type repairs them.', $row->drifted, $row->subject_type), (string) $row->subject_type);
+            }
         }
 
         return $findings;
@@ -209,7 +234,8 @@ final readonly class Doctor
      */
     private function privacy(Connection $db): array
     {
-        $verdict = $this->gate->inspect($db);
+        // The settings of the server the searches run on: the write connection.
+        $verdict = $db->usingWritePdo(fn (): PrivacyVerdict => $this->gate->inspect($db));
 
         return array_map(static fn (string $violation): Finding => new Finding('privacy', $violation), $verdict->violations);
     }

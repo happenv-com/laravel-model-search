@@ -53,9 +53,27 @@ final class PrivacyGate
     }
 
     /**
-     * The verdict for the connection's server, from the cache when it is under a minute old.
+     * The verdict for the connection's server, from the cache when it is under a minute old. A fresh
+     * unsafe reading is announced with {@see SearchPrivacyUnsafe}.
      */
     public function verdict(Connection $connection): PrivacyVerdict
+    {
+        [$verdict, $fresh] = $this->read($connection);
+
+        if ($fresh) {
+            $this->announce($verdict);
+        }
+
+        return $verdict;
+    }
+
+    /**
+     * Like {@see self::verdict()}, but announces nothing: the caller dispatches the event itself once
+     * it is outside the transaction it read the settings in (a listener may write to the database).
+     *
+     * @return array{PrivacyVerdict, bool} The verdict, and whether it was read from the server just now.
+     */
+    public function read(Connection $connection): array
     {
         $key = $this->key($connection);
 
@@ -66,7 +84,7 @@ final class PrivacyGate
         }
 
         if ($cached instanceof PrivacyVerdict) {
-            return $cached;
+            return [$cached, false];
         }
 
         $verdict = $this->inspect($connection);
@@ -77,11 +95,17 @@ final class PrivacyGate
             // The cache only saves a query.
         }
 
+        return [$verdict, true];
+    }
+
+    /**
+     * Dispatches {@see SearchPrivacyUnsafe} for an unsafe verdict that was just read.
+     */
+    public function announce(PrivacyVerdict $verdict): void
+    {
         if (! $verdict->isSafe()) {
             Event::dispatch(new SearchPrivacyUnsafe($verdict->violations, $this->refuses()));
         }
-
-        return $verdict;
     }
 
     /**

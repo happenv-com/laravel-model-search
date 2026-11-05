@@ -86,6 +86,7 @@ SQL;
 
         $stage = $query->stagesEnabled() ? $this->definition->constrainedStage() : null;
         $host = $query->scope();
+        $query->charge();
 
         try {
             [$rows, $restricted] = $this->run($this->timeout('search'), function (Connection $db) use ($query, $hits, $host, $stage): array {
@@ -119,6 +120,7 @@ SQL;
 
         $stage = $query->stagesEnabled() ? $this->definition->constrainedStage() : null;
         $host = $query->scope();
+        $query->charge();
 
         try {
             $rows = $this->run($this->timeout('similar'), fn (Connection $db): array => $this->select($db, $this->rowsSql($query, $hits, $host, $stage, false)));
@@ -137,11 +139,13 @@ SQL;
         $ids = [];
 
         if ($hits instanceof Fragment) {
+            $query->charge();
             $rows = $this->run($this->timeout('search'), fn (Connection $db): array => $this->select($db, $this->idsSql($query, $hits)));
             $ids = array_values(array_unique(array_map(static fn (Hit $hit): string => $hit->rootId, $rows)));
             IdNarrowing::assertWithinCap($ids);
         }
 
+        $query->matched(count($ids));
         IdNarrowing::narrow($tableQuery, $ids, $this->keyType());
 
         return $tableQuery;
@@ -156,6 +160,7 @@ SQL;
             return new Collection;
         }
 
+        $query->charge();
         $rows = $this->run($this->timeout('search'), fn (Connection $db): array => $this->select($db, $this->candidatesSql($query, $hits)));
         $stage = $this->definition->constrainedStage();
 
