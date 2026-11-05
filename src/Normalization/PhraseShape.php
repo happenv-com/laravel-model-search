@@ -15,11 +15,13 @@ final class PhraseShape
      */
     public static function isIdentifierLike(string $q): bool
     {
-        if (str_contains($q, '@')) {
+        $folded = (new NameNormalizer)->unicodeFolded($q);
+
+        if (str_contains($folded, '@')) {
             return true;
         }
 
-        $alphanumeric = (string) preg_replace('/[^\p{L}\p{N}]+/u', '', $q);
+        $alphanumeric = (string) preg_replace('/[^\p{L}\p{N}]+/u', '', $folded);
         $total = mb_strlen($alphanumeric);
 
         if ($total === 0) {

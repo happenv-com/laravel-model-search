@@ -28,3 +28,8 @@ it('splits a phrase into normalized words', function (): void {
     expect(PhraseShape::words('  Łódź   Kowalska-Nowak '))->toBe(['lodz', 'kowalska', 'nowak'])
         ->and(PhraseShape::words(''))->toBe([]);
 });
+
+it('classifies the folded phrase', function (): void {
+    expect(PhraseShape::isIdentifierLike('＠x'))->toBeTrue()
+        ->and(PhraseShape::isIdentifierLike('①②ab'))->toBeTrue();
+});

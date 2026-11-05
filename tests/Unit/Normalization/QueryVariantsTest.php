@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Happenv\ModelSearch\Normalization\NameNormalizer;
 use Happenv\ModelSearch\Normalization\QueryVariants;
 
 covers(QueryVariants::class);
@@ -25,4 +26,19 @@ it('never returns more than three distinct variants', function (): void {
 
 it('returns nothing for a blank phrase', function (): void {
     expect(QueryVariants::for('   ', 'de'))->toBe([]);
+});
+
+it('returns no empty variants', function (): void {
+    expect(QueryVariants::for('北京', null))->toBe([])
+        ->and(QueryVariants::keysFor('北京', 'de'))->toBe([]);
+});
+
+it('starts with the index-side normalization', function (): void {
+    expect(QueryVariants::for('Müller', 'de')[0])->toBe((new NameNormalizer)->normalize('Müller'));
+});
+
+it('gives key forms of the variants', function (): void {
+    expect(QueryVariants::keysFor('Müller', 'de'))->toBe(['muller', 'mueller'])
+        ->and(QueryVariants::keysFor('OR-9173', null))->toBe(['or9173'])
+        ->and(QueryVariants::keysFor('OR-9173 ', 'de'))->toBe(['or9173']);
 });

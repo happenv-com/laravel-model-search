@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Happenv\ModelSearch\Normalization\NameNormalizer;
 use Happenv\ModelSearch\Normalization\NameWords;
 
 covers(NameWords::class);
@@ -30,4 +31,16 @@ it('does not apply the per-record cap', function (): void {
 
 it('returns nothing for an empty name', function (): void {
     expect(NameWords::of(''))->toBe([]);
+});
+
+it('keeps numeric words as strings', function (): void {
+    expect(NameWords::of('anna 12 012'))->toBe(['anna', '12', '012']);
+});
+
+it('splits punctuation-joined names into words', function (): void {
+    $normalizer = new NameNormalizer;
+
+    expect(NameWords::of($normalizer->normalize('J.Kowalski')))->toBe(['kowalski'])
+        ->and(NameWords::of($normalizer->normalize('Kowalski, Jan')))->toBe(['kowalski', 'jan'])
+        ->and(NameWords::of($normalizer->normalize("O'Brien")))->toBe(['obrien']);
 });

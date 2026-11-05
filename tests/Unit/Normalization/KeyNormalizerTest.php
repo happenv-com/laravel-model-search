@@ -25,3 +25,13 @@ it('implements the normalizer contract with a version', function (): void {
     expect($normalizer)->toBeInstanceOf(Normalizer::class)
         ->and($normalizer->version())->toBe(1);
 });
+
+it('may normalise to an empty string', function (string $raw): void {
+    expect((new KeyNormalizer)->normalize($raw))->toBe('');
+})->with(['cjk' => ['北京'], 'emoji' => ['😀'], 'only separators' => [' - . ']]);
+
+it('exposes no public folding helper', function (): void {
+    $class = new ReflectionClass(KeyNormalizer::class);
+
+    expect($class->hasMethod('fold') && $class->getMethod('fold')->isPublic())->toBeFalse();
+});

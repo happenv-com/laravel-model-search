@@ -4,12 +4,13 @@
     "license": "MIT",
     "type": "library",
     "require": {
+        "php": "^8.4",
         "illuminate/console": "^13.0",
         "illuminate/contracts": "^13.0",
         "illuminate/database": "^13.0",
         "illuminate/support": "^13.0",
         "nesbot/carbon": "^3.0",
-        "php": "^8.4"
+        "symfony/polyfill-intl-normalizer": "^1.0"
     },
     "require-dev": {
         "ergebnis/composer-normalize": "^2.52",

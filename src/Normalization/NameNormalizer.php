@@ -5,20 +5,43 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Normalization;
 
 /**
- * Normalizes human names and phrases: the same folding as {@see KeyNormalizer}, but word
- * separators survive and runs of whitespace collapse to a single space.
+ * Normalizes human names and phrases: the same folding as {@see KeyNormalizer}, but hyphens
+ * survive as word boundaries. Apostrophes are removed, other punctuation (`_ . / # + , : ;`) is
+ * a word boundary, and runs of whitespace collapse to a single space.
  */
-final class NameNormalizer implements Normalizer
+final class NameNormalizer extends FoldsText
 {
-    public function normalize(string $value, string $locale = 'en'): string
+    public function normalize(string $value): string
     {
-        $folded = KeyNormalizer::fold($value, $locale);
+        return $this->tidy(self::fold($value));
+    }
 
-        return trim((string) preg_replace('/\s+/u', ' ', $folded));
+    /**
+     * Query-side only: the name form under a locale-specific transliteration.
+     */
+    public function transliterated(string $value, string $locale): string
+    {
+        return $this->tidy(self::fold($value, $locale));
+    }
+
+    /**
+     * The NFKC, lower-cased form, before any transliteration or separator handling.
+     */
+    public function unicodeFolded(string $value): string
+    {
+        return self::foldUnicode($value);
     }
 
     public function version(): int
     {
         return 1;
+    }
+
+    private function tidy(string $folded): string
+    {
+        $withoutApostrophes = str_replace(["'", '’', '`'], '', $folded);
+        $spaced = (string) preg_replace('/[_.\/#+,:;\s]+/u', ' ', $withoutApostrophes);
+
+        return trim($spaced);
     }
 }

@@ -22,16 +22,29 @@ final class QueryVariants
         $normalizer = new NameNormalizer;
         $neutral = $normalizer->normalize($q);
 
-        if ($neutral === '') {
-            return [];
-        }
-
         $variants = [$neutral];
 
         if ($locale !== null && $locale !== '') {
-            $variants[] = $normalizer->normalize($q, $locale);
+            $variants[] = $normalizer->transliterated($q, $locale);
         }
 
-        return array_slice(array_values(array_unique($variants)), 0, self::MAX);
+        return array_slice(array_values(array_unique(array_filter($variants, static fn (string $v): bool => $v !== ''))), 0, self::MAX);
+    }
+
+    /**
+     * The key form of each variant, unique and non-empty.
+     *
+     * @return list<string>
+     */
+    public static function keysFor(string $q, ?string $locale): array
+    {
+        $normalizer = new KeyNormalizer;
+        $keys = [$normalizer->normalize($q)];
+
+        if ($locale !== null && $locale !== '') {
+            $keys[] = $normalizer->transliterated($q, $locale);
+        }
+
+        return array_slice(array_values(array_unique(array_filter($keys, static fn (string $k): bool => $k !== ''))), 0, self::MAX);
     }
 }
