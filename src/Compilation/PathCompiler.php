@@ -79,7 +79,7 @@ final class PathCompiler
         $current = $rootModel;
 
         foreach ($segments as $name) {
-            foreach ($this->stepsOf($this->relationOf($current, $name), $current, $withScopes) as [$step, $toModel, $toTable]) {
+            foreach ($this->stepsOf($this->relationOf($current, $name), $current, $withScopes, $connection) as [$step, $toModel, $toTable]) {
                 $depth = count($steps) + 1;
                 $previous = $depth - 1;
                 $previousModel = $models[$previous];
@@ -97,7 +97,7 @@ final class PathCompiler
                     $parentType = $typeOf($previous, $step->fromColumn);
 
                     if ($previous > 0 || $step->fromColumn !== $root->keyColumn) {
-                        $this->addHop($hops, new ReverseHop($parentType, $root, array_slice($steps, 0, $previous), $step->fromColumn, $keyTypeAt($previous, $step->fromColumn)));
+                        $this->addHop($hops, new ReverseHop($parentType, $root, array_slice($steps, 0, $previous), $step->fromColumn, $keyTypeAt($previous, $step->fromColumn), $this->canRepeat(array_slice($steps, 0, $previous), $parentType)));
                     }
 
                     $tableShapes[] = ['child', $parentType, $step->toColumn, $step];
@@ -107,7 +107,7 @@ final class PathCompiler
                     }
 
                     $selfType = $typeOf($depth, $step->toColumn);
-                    $this->addHop($hops, new ReverseHop($selfType, $root, [...$steps, $step], $step->toColumn, $keyTypeAt($depth, $step->toColumn)));
+                    $this->addHop($hops, new ReverseHop($selfType, $root, [...$steps, $step], $step->toColumn, $keyTypeAt($depth, $step->toColumn), $this->canRepeat([...$steps, $step], $selfType)));
                     $tableShapes[] = ['self', $selfType, $step->toColumn, $step];
                 }
 
@@ -167,6 +167,17 @@ final class PathCompiler
     }
 
     /**
+     * Whether a node can be reached by several chains of rows from the same root: through a pivot or
+     * a through relation, or when the node's key is not the unique primary key.
+     *
+     * @param  list<Step>  $steps
+     */
+    private function canRepeat(array $steps, string $nodeType): bool
+    {
+        return str_contains($nodeType, '#') || array_any($steps, static fn (Step $step): bool => $step->multiplies);
+    }
+
+    /**
      * @return Relation<*, *, *>
      */
     private function relationOf(Model $model, string $name): Relation
@@ -207,10 +218,10 @@ final class PathCompiler
      * @param  list<class-string>  $withScopes
      * @return list<array{Step, Model|null, string}> The step, the model reached (null for a pivot) and its table name.
      */
-    private function stepsOf(Relation $relation, Model $from, array $withScopes): array
+    private function stepsOf(Relation $relation, Model $from, array $withScopes, string $connection): array
     {
         if ($relation instanceof BelongsTo) {
-            return [$this->step($relation->getRelated(), $relation->getForeignKeyName(), $relation->getOwnerKeyName(), 'self', $withScopes)];
+            return [$this->step($relation->getRelated(), $relation->getForeignKeyName(), $relation->getOwnerKeyName(), 'self', $withScopes, $connection)];
         }
 
         if ($relation instanceof HasOneOrMany) {
@@ -223,25 +234,25 @@ final class PathCompiler
                 $morphValue = $relation->getMorphClass();
             }
 
-            return [$this->step($relation->getRelated(), $relation->getLocalKeyName(), $relation->getForeignKeyName(), 'child', $withScopes, $morphColumn, $morphValue)];
+            return [$this->step($relation->getRelated(), $relation->getLocalKeyName(), $relation->getForeignKeyName(), 'child', $withScopes, $connection, $morphColumn, $morphValue)];
         }
 
         if ($relation instanceof HasOneOrManyThrough) {
             $through = $relation->getParent();
 
             return [
-                $this->step($through, $relation->getLocalKeyName(), $relation->getFirstKeyName(), 'child', $withScopes),
-                $this->step($relation->getRelated(), $relation->getSecondLocalKeyName(), $relation->getForeignKeyName(), 'child', $withScopes),
+                $this->step($through, $relation->getLocalKeyName(), $relation->getFirstKeyName(), 'child', $withScopes, $connection, multiplies: true),
+                $this->step($relation->getRelated(), $relation->getSecondLocalKeyName(), $relation->getForeignKeyName(), 'child', $withScopes, $connection, multiplies: true),
             ];
         }
 
         if ($relation instanceof BelongsToMany) {
             $pivot = $relation->getTable();
-            $pivotStep = new Step(Sql::table($from, $pivot), $relation->getParentKeyName(), $relation->getForeignPivotKeyName(), 'child', null, null, null, null);
+            $pivotStep = new Step(Sql::table($from, $pivot), $relation->getParentKeyName(), $relation->getForeignPivotKeyName(), 'child', null, null, null, null, true);
 
             return [
                 [$pivotStep, null, $pivot],
-                $this->step($relation->getRelated(), $relation->getRelatedPivotKeyName(), $relation->getRelatedKeyName(), 'self', $withScopes),
+                $this->step($relation->getRelated(), $relation->getRelatedPivotKeyName(), $relation->getRelatedKeyName(), 'self', $withScopes, $connection),
             ];
         }
 
@@ -252,7 +263,20 @@ final class PathCompiler
      * @param  list<class-string>  $withScopes
      * @return array{Step, Model, string}
      */
-    private function step(Model $related, string $fromColumn, string $toColumn, string $shape, array $withScopes, ?string $morphColumn = null, ?string $morphValue = null): array
+    private function step(Model $related, string $fromColumn, string $toColumn, string $shape, array $withScopes, string $connection, ?string $morphColumn = null, ?string $morphValue = null, bool $multiplies = false): array
+    {
+        if (Sql::connectionName($related) !== $connection) {
+            throw new UnsupportedRelation(sprintf('%s is on the connection "%s", but the path runs on "%s"; a path cannot cross connections.', $related::class, Sql::connectionName($related), $connection));
+        }
+
+        return $this->buildStep($related, $fromColumn, $toColumn, $shape, $withScopes, $morphColumn, $morphValue, $multiplies);
+    }
+
+    /**
+     * @param  list<class-string>  $withScopes
+     * @return array{Step, Model, string}
+     */
+    private function buildStep(Model $related, string $fromColumn, string $toColumn, string $shape, array $withScopes, ?string $morphColumn = null, ?string $morphValue = null, bool $multiplies = false): array
     {
         /** @var 'child'|'self' $shape */
         $step = new Step(
@@ -264,6 +288,7 @@ final class PathCompiler
             morphValue: $morphValue,
             softDeleteColumn: Sql::softDeleteColumn($related),
             derived: $this->derivedTable($related, $withScopes),
+            multiplies: $multiplies,
         );
 
         return [$step, $related, $related->getTable()];
@@ -297,6 +322,9 @@ final class PathCompiler
 
         $base = $query->applyScopes()->toBase();
 
-        return ['sql' => $base->toSql(), 'bindings' => $base->getBindings()];
+        return [
+            'sql' => $base->toSql(),
+            'bindings' => BindingGuard::canonical($base->getBindings(), sprintf('A global scope of %s that the definition lists', $model::class)),
+        ];
     }
 }

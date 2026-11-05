@@ -7,6 +7,7 @@ namespace Happenv\ModelSearch\Definition;
 use Happenv\ModelSearch\Compilation\ColumnTypes;
 use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Compilation\WatchedTable;
+use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Query\Expression;
 
@@ -35,7 +36,11 @@ final readonly class CompiledDefinition
         public int $version = 1,
         public array $withScopes = [],
         public ?string $keySqlType = null,
-    ) {}
+    ) {
+        if ($keySqlType !== null && preg_match('/^[a-z][a-z0-9_]*$/', $keySqlType) !== 1) {
+            throw new InvalidSearchDefinition(sprintf('"%s" is not a plain PostgreSQL type name.', $keySqlType));
+        }
+    }
 
     /**
      * Whether the definition narrows anything besides the final "all" stage.

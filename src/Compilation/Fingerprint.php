@@ -88,8 +88,18 @@ final class Fingerprint
             'via' => $via,
             'translatable' => $field->translatable,
             'normalizer' => self::normalizer($field),
-            'contribution' => $field->compiledPath?->contributionSql([]),
+            'contribution' => self::contribution($field),
         ];
+    }
+
+    /**
+     * @return array{sql: string, bindings: list<bool|float|int|string|null>}|null
+     */
+    private static function contribution(CompiledField $field): ?array
+    {
+        $query = $field->compiledPath?->contributionSql([]);
+
+        return $query === null ? null : ['sql' => $query['sql'], 'bindings' => BindingGuard::canonical($query['bindings'], 'A field path')];
     }
 
     /**

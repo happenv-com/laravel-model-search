@@ -17,6 +17,7 @@ final readonly class Step
     /**
      * @param  'child'|'self'  $shape
      * @param  array{sql: string, bindings: list<mixed>}|null  $derived  The table seen through the listed global scopes.
+     * @param  bool  $multiplies  Whether one root can reach the same node through several rows of this step (pivot and through steps).
      */
     public function __construct(
         public string $quotedTable,
@@ -27,5 +28,6 @@ final readonly class Step
         public ?string $morphValue,
         public ?string $softDeleteColumn,
         public ?array $derived,
+        public bool $multiplies = false,
     ) {}
 }

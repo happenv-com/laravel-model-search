@@ -34,7 +34,7 @@ final class ColumnTypes
             }
 
             if ($types === []) {
-                throw new InvalidFieldPath(sprintf('The table "%s" does not exist or has no columns, so its keys cannot be typed.', $table));
+                throw new InvalidFieldPath(sprintf('The table "%s" on the connection "%s" does not exist or has no columns, so its keys cannot be typed.', $table, $connection->getName()));
             }
 
             $this->tables[$key] = $types;
@@ -43,7 +43,7 @@ final class ColumnTypes
         $type = $this->tables[$key][$column] ?? null;
 
         if ($type === null) {
-            throw new InvalidFieldPath(sprintf('The column "%s.%s" does not exist.', $table, $column));
+            throw new InvalidFieldPath(sprintf('The column "%s.%s" does not exist on the connection "%s".', $table, $column, $connection->getName()));
         }
 
         if (preg_match('/^[a-z][a-z0-9_]*$/', $type) !== 1) {

@@ -168,4 +168,20 @@ final class Order extends Model
     {
         return $this->hasOne(MarketOrder::class, 'order_signature', 'signature');
     }
+
+    /**
+     * @return BelongsTo<RecentAddress, $this>
+     */
+    public function recentBillingAddress(): BelongsTo
+    {
+        return $this->belongsTo(RecentAddress::class, 'billing_address_id');
+    }
+
+    /**
+     * @return BelongsTo<ElsewhereAddress, $this>
+     */
+    public function elsewhereAddress(): BelongsTo
+    {
+        return $this->belongsTo(ElsewhereAddress::class, 'billing_address_id');
+    }
 }

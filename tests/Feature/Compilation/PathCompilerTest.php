@@ -7,6 +7,7 @@ use Happenv\ModelSearch\Compilation\PathCompiler;
 use Happenv\ModelSearch\Compilation\ReverseHop;
 use Happenv\ModelSearch\Compilation\WatchedTable;
 use Happenv\ModelSearch\Exceptions\InvalidFieldPath;
+use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\UnsupportedRelation;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Address;
 use Happenv\ModelSearch\Tests\Fixtures\Models\CarrierUnit;
@@ -19,6 +20,7 @@ use Happenv\ModelSearch\Tests\Fixtures\Models\Product;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Tag;
 use Happenv\ModelSearch\Tests\Fixtures\Models\UlidRecord;
 use Happenv\ModelSearch\Tests\Fixtures\Scopes\NamedAddressScope;
+use Happenv\ModelSearch\Tests\Fixtures\Scopes\RecentAddressScope;
 use Illuminate\Support\Facades\DB;
 
 covers(PathCompiler::class);
@@ -387,5 +389,33 @@ describe('watched table metadata', function (): void {
 
         expect($table->connection)->toBe('pgsql')
             ->and($table->quotedTable)->toBe('"market_orders"');
+    });
+});
+
+describe('guards', function (): void {
+    it('refuses a related model on another connection', function (): void {
+        config(['database.connections.elsewhere' => config('database.connections.pgsql')]);
+
+        compilePath(Order::class, 'elsewhereAddress.phone');
+    })->throws(UnsupportedRelation::class, 'elsewhere');
+
+    it('refuses a global scope whose bindings depend on the clock', function (): void {
+        compilePath(Order::class, 'recentBillingAddress.phone', withScopes: [RecentAddressScope::class]);
+    })->throws(InvalidSearchDefinition::class, 'time');
+
+    it('ignores such a scope when the definition does not list it', function (): void {
+        expect(compilePath(Order::class, 'recentBillingAddress.phone'))->toBeInstanceOf(CompiledPath::class);
+    });
+});
+
+describe('reverse hop duplicates', function (): void {
+    it('drops DISTINCT where the chain cannot repeat a root and keeps it where it can', function (): void {
+        $plain = compilePath(Order::class, 'billingAddress.phone')->reverseHops()[0]->rootsSql('table:addresses', ['x'], 5)['sql'];
+        $pivot = compilePath(Order::class, 'tags.name')->reverseHops()[0]->rootsSql('table:tags', ['1'], 5)['sql'];
+        $through = compilePath(Order::class, 'parcelCarrierUnits.tracking_number')->reverseHops()[0]->rootsSql('table:parcels', ['x'], 5)['sql'];
+
+        expect($plain)->not->toContain('DISTINCT')
+            ->and($pivot)->toContain('DISTINCT')
+            ->and($through)->toContain('DISTINCT');
     });
 });

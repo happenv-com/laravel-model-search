@@ -14,6 +14,9 @@ use Illuminate\Database\Query\Builder as QueryBuilder;
  * Applies a stage constraint to a fresh query of the model and checks what it touches: only the
  * model's own table, only columns declared through {@see SearchStage::watching()}. A stage that
  * quietly depends on something else is an index that quietly goes stale.
+ *
+ * Time-relative values are refused when they are date objects. A time-relative constraint passed as a
+ * plain string (for example `->toDateString()`) cannot be detected and is equally wrong.
  */
 final class StageConstraintInspector
 {

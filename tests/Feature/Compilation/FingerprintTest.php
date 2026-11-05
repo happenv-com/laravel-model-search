@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Happenv\ModelSearch\Compilation\Fingerprint;
+use Happenv\ModelSearch\Compilation\PathCompiler;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Definition\SearchField;
@@ -12,6 +13,7 @@ use Happenv\ModelSearch\Normalization\Normalizer;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Happenv\ModelSearch\Tests\Fixtures\Enums\OrderState;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
+use Happenv\ModelSearch\Tests\Fixtures\Scopes\NamedAddressScope;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
 
 covers(Fingerprint::class);
@@ -136,3 +138,18 @@ it('refuses to hash a stage binding that is not a scalar, null or enum', functio
 
     Fingerprint::of($definition);
 })->throws(InvalidStageConstraint::class);
+
+it('canonicalises the bindings of a listed scope', function (): void {
+    $compiler = new PathCompiler;
+    $definition = static fn (): CompiledDefinition => new CompiledDefinition(
+        Order::class,
+        'order',
+        'uuid',
+        [SearchField::key('scopedBillingAddress.phone')->toCompiled(false)->withCompiledPath($compiler->compile(Order::class, 'scopedBillingAddress.phone', false, [NamedAddressScope::class]))],
+        [SearchStage::all()],
+        null,
+        null,
+    );
+
+    expect(Fingerprint::of($definition()))->toBe(Fingerprint::of($definition()));
+});
