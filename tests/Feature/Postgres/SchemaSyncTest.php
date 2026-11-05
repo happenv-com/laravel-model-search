@@ -413,3 +413,89 @@ it('does not run two syncs at once', function (): void {
     expect($outcome->skipped)->toBe('another sync is running')
         ->and(triggerNames())->not->toContain('model_search_orders_ins');
 });
+
+it('drops an interrupted index build and reports it instead of stamping an invalid index', function (): void {
+    $name = indexName('keys_key');
+    DB::statement('DROP INDEX '.$name);
+
+    config(['database.connections.second' => config('database.connections.pgsql')]);
+    $other = DB::connection('second');
+    $other->beginTransaction();
+    $other->getPdo()->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    $other->select('SELECT count(*) FROM invoices');
+
+    try {
+        $impatient = new SchemaSync(app(ModelSearchRegistry::class), null, '2s', 1, 10, '300ms');
+
+        try {
+            $impatient->apply();
+            $this->fail('A build that waits for an old snapshot past its lock timeout must be reported.');
+        } catch (SchemaSyncIncomplete $exception) {
+            expect($exception->getMessage())->toContain($name);
+        }
+
+        $invalid = DB::selectOne("SELECT count(*) AS n FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE NOT i.indisvalid AND starts_with(c.relname, 'model_search_')");
+
+        expect($invalid->n)->toBe(0)
+            ->and(indexExists($name))->toBeFalse();
+    } finally {
+        $other->rollBack();
+    }
+
+    sync()->apply();
+
+    $row = DB::selectOne('SELECT i.indisvalid AS valid, obj_description(i.indexrelid, \'pg_class\') AS comment FROM pg_index i WHERE i.indexrelid = to_regclass(?)', [$name]);
+
+    expect($row->valid)->toBeTrue()
+        ->and($row->comment)->toStartWith('model-search:')
+        ->and(sync()->diff())->toBe([]);
+});
+
+it('does not let a failing advisory unlock hide the original exception', function (): void {
+    config(['database.connections.second' => config('database.connections.pgsql')]);
+    $other = DB::connection('second');
+    $other->beginTransaction();
+    $other->getPdo()->exec('DROP INDEX '.indexName('keys_key'));
+    $other->beforeExecuting(static function (string $query): void {
+        if (str_contains($query, 'pg_advisory_unlock')) {
+            throw new RuntimeException('simulated 25P02 on unlock');
+        }
+    });
+
+    try {
+        expect(static fn () => (new SchemaSync(app(ModelSearchRegistry::class), 'second'))->apply())
+            ->toThrow(LogicException::class, 'CONCURRENTLY');
+    } finally {
+        $other->rollBack();
+    }
+});
+
+it('anchors the projection schema on the changes table, whatever the search path says', function (): void {
+    DB::statement('CREATE SCHEMA IF NOT EXISTS model_search_decoy');
+    sync()->plan();
+    DB::statement('SET search_path = model_search_decoy, public');
+
+    try {
+        $schema = sync()->plan()->schema;
+        $diff = sync()->diff();
+    } finally {
+        DB::statement('SET search_path = public');
+        DB::statement('DROP SCHEMA model_search_decoy');
+    }
+
+    expect($schema)->toBe('public')
+        ->and($diff)->toBe([]);
+});
+
+it('fixes the search path once per inspection pass', function (): void {
+    $fixed = 0;
+    DB::listen(static function ($query) use (&$fixed): void {
+        if (str_contains($query->sql, "set_config('search_path', 'pg_catalog'")) {
+            $fixed++;
+        }
+    });
+
+    sync()->diff();
+
+    expect($fixed)->toBe(1);
+});

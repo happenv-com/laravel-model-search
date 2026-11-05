@@ -17,6 +17,7 @@ final readonly class SchemaChange
      * @param  list<string>  $relations  Tables (as SQL) whose owner must be the acting role.
      * @param  list<string>  $routines  Functions (as SQL, with arguments) whose owner must be the acting role.
      * @param  list<array{kind: 'function'|'trigger', name: string, on: string, sql: string}>  $stamps  Comments to write once the statements ran.
+     * @param  string|null  $afterValid  For an index build: the statement (the marker comment) that may run only once the index named by `$subject` is valid.
      */
     public function __construct(
         public string $kind,
@@ -28,6 +29,7 @@ final readonly class SchemaChange
         public array $relations = [],
         public array $routines = [],
         public array $stamps = [],
+        public ?string $afterValid = null,
     ) {}
 
     public function describe(): string

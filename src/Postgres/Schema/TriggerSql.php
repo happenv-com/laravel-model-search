@@ -27,6 +27,12 @@ use InvalidArgumentException;
  * updating the same state row, the deadlock detector resolves it and the truncate is retried by
  * the caller, so no extra locking order is imposed.
  *
+ * Known limit: columns are compared through their text output, and the text of `float4`/`float8`
+ * depends on the writing session's `extra_float_digits`. With a value of 0 or less, a change that
+ * only shows in the digits that are not printed (a float8 moving from 0.1 to 0.1000000000000001) is
+ * seen as no change and goes unlogged. Watch a float column only if such a change cannot matter, or
+ * keep `extra_float_digits` at its default (1) or higher, which prints the shortest exact text.
+ *
  * Two shapes of watching (see {@see WatchedTable}):
  * - child: the row holds a foreign key to its parent; the parent is logged (the old and the new
  *   one when the key moves). A polymorphic child is guarded on its discriminator for OLD and NEW.

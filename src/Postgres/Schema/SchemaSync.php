@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\DB;
 use LogicException;
 use PDOException;
 use stdClass;
+use Throwable;
 
 /**
  * Keeps the triggers and indexes derived from the registered definitions in step with the database.
@@ -33,7 +34,12 @@ use stdClass;
  * a long writer while blocking the ones behind it. A lock timeout is retried (jittered backoff);
  * a table that stays locked is left for later while the rest, indexes included, is installed, and
  * the run ends with one {@see SchemaSyncIncomplete}. Indexes are built with CONCURRENTLY, outside
- * any transaction; a failed build leaves an invalid index, which the next run drops and rebuilds.
+ * any transaction, and without a lock timeout (`$buildLockTimeout`, 0 = wait): a concurrent build
+ * holds only SHARE UPDATE EXCLUSIVE but has to wait for every older snapshot in the database, which
+ * can legitimately take a while. A build that fails anyway (a statement timeout, a deadlock, a
+ * cancelled wait) leaves an invalid index; it is dropped before the retry, the marker is written
+ * only once `pg_index.indisvalid` says the index is usable, and a build that still fails ends up in
+ * {@see SchemaSyncIncomplete} like a locked table.
  * Concurrent runs are serialised by a session advisory lock; the second one does nothing. Because
  * that lock belongs to the database session, the sync must run on a direct connection, not through
  * a transaction-pooled one (PgBouncer in transaction mode may hand the unlock to another backend).
@@ -55,6 +61,7 @@ final readonly class SchemaSync
         private string $lockTimeout = '2s',
         private int $retries = 3,
         private int $backoffMs = 100,
+        private string $buildLockTimeout = '0',
     ) {}
 
     /**
@@ -70,7 +77,7 @@ final readonly class SchemaSync
     public function plan(): SchemaPlan
     {
         $names = $this->names();
-        $schema = $this->currentSchema();
+        $schema = $this->projectionSchema();
         $definitions = $this->registry->all();
         $connectionName = $this->db()->getName();
 
@@ -154,7 +161,12 @@ final readonly class SchemaSync
 
             return $this->run($changes);
         } finally {
-            $db->selectOne('SELECT pg_advisory_unlock(hashtext(?))', [$key]);
+            // When the caller's transaction was aborted (25P02) the unlock fails too, and must not
+            // replace the exception that aborted it. The lock dies with the session anyway.
+            try {
+                $db->selectOne('SELECT pg_advisory_unlock(hashtext(?))', [$key]);
+            } catch (Throwable) {
+            }
         }
     }
 
@@ -203,8 +215,10 @@ final readonly class SchemaSync
                 $this->execute($change);
 
                 return true;
-            } catch (QueryException|PDOException $exception) {
-                if (($exception->errorInfo[0] ?? null) !== '55P03') {
+            } catch (QueryException|PDOException|InvalidIndexBuild $exception) {
+                $this->discardIndexLeftover($change);
+
+                if (! $exception instanceof InvalidIndexBuild && ($exception->errorInfo[0] ?? null) !== '55P03') {
                     throw $exception;
                 }
 
@@ -227,11 +241,20 @@ final readonly class SchemaSync
             }
 
             $previous = $db->selectOne("SELECT current_setting('lock_timeout') AS value");
-            $db->selectOne("SELECT set_config('lock_timeout', ?, false)", [$this->lockTimeout]);
 
             try {
                 foreach ($change->statements as $statement) {
+                    // A build waits for old snapshots as long as it takes; a drop only for lockers of the table.
+                    $db->selectOne("SELECT set_config('lock_timeout', ?, false)", [str_starts_with($statement, 'DROP') ? $this->lockTimeout : $this->buildLockTimeout]);
                     $db->getPdo()->exec($statement);
+                }
+
+                if ($change->afterValid !== null) {
+                    if (! $this->indexIsValid($change->subject)) {
+                        throw new InvalidIndexBuild(sprintf('The build of %s did not leave a valid index.', $change->subject));
+                    }
+
+                    $db->getPdo()->exec($change->afterValid);
                 }
             } finally {
                 $db->selectOne("SELECT set_config('lock_timeout', ?, false)", [$previous === null ? '0' : (string) $previous->value]);
@@ -247,30 +270,83 @@ final readonly class SchemaSync
                 $db->getPdo()->exec($statement);
             }
 
-            foreach ($change->stamps as $stamp) {
-                $this->stamp($stamp);
-            }
+            $this->stamp($change->stamps);
         });
     }
 
     /**
-     * Writes the marker with the definition PostgreSQL reads back for the object just created.
+     * Writes the markers with the definitions PostgreSQL reads back for the objects just created:
+     * names are resolved by the session's path first, then every definition is read in one pass under
+     * the fixed path, then the comments are written.
      *
-     * @param  array{kind: 'function'|'trigger', name: string, on: string, sql: string}  $stamp
+     * @param  list<array{kind: 'function'|'trigger', name: string, on: string, sql: string}>  $stamps
      */
-    private function stamp(array $stamp): void
+    private function stamp(array $stamps): void
     {
-        $db = $this->db();
-
-        if ($stamp['kind'] === 'function') {
-            $oid = $db->selectOne('SELECT to_regprocedure(?)::oid AS oid', [$stamp['name'].'()'])?->oid;
-            $statement = sprintf('COMMENT ON FUNCTION %s() IS %s', $stamp['name'], TriggerSql::literal(Marker::of($stamp['sql'], $this->definitionMd5('pg_get_functiondef', $oid))));
-        } else {
-            $oid = $db->selectOne('SELECT t.oid AS oid FROM pg_trigger t WHERE t.tgrelid = to_regclass(?) AND t.tgname = ?', [$stamp['on'], $stamp['name']])?->oid;
-            $statement = sprintf('COMMENT ON TRIGGER %s ON %s IS %s', Sql::ident($stamp['name']), $stamp['on'], TriggerSql::literal(Marker::of($stamp['sql'], $this->definitionMd5('pg_get_triggerdef', $oid))));
+        if ($stamps === []) {
+            return;
         }
 
-        $db->getPdo()->exec($statement);
+        $db = $this->db();
+        $oids = [];
+
+        foreach ($stamps as $index => $stamp) {
+            $oids[$index] = $stamp['kind'] === 'function'
+                ? $db->selectOne('SELECT to_regprocedure(?)::oid AS oid', [$stamp['name'].'()'])?->oid
+                : $db->selectOne('SELECT t.oid AS oid FROM pg_trigger t WHERE t.tgrelid = to_regclass(?) AND t.tgname = ?', [$stamp['on'], $stamp['name']])?->oid;
+        }
+
+        $md5s = $this->underFixedSearchPath(function () use ($stamps, $oids, $db): array {
+            $md5s = [];
+
+            foreach ($stamps as $index => $stamp) {
+                $renderer = $stamp['kind'] === 'function' ? 'pg_get_functiondef' : 'pg_get_triggerdef';
+                $md5s[$index] = (string) $db->selectOne(sprintf('SELECT md5(%s(?::oid)) AS md5', $renderer), [$oids[$index]])?->md5;
+            }
+
+            return $md5s;
+        });
+
+        foreach ($stamps as $index => $stamp) {
+            $marker = TriggerSql::literal(Marker::of($stamp['sql'], $md5s[$index]));
+
+            $db->getPdo()->exec($stamp['kind'] === 'function'
+                ? sprintf('COMMENT ON FUNCTION %s() IS %s', $stamp['name'], $marker)
+                : sprintf('COMMENT ON TRIGGER %s ON %s IS %s', Sql::ident($stamp['name']), $stamp['on'], $marker));
+        }
+    }
+
+    private function indexIsValid(string $name): bool
+    {
+        $row = $this->db()->selectOne('SELECT i.indisvalid AS valid FROM pg_index i WHERE i.indexrelid = to_regclass(?)', [Sql::ident($this->projectionSchema()).'.'.Sql::ident($name)]);
+
+        return $row !== null && $row->valid === true;
+    }
+
+    /**
+     * A concurrent build that failed leaves an invalid index behind; the retry (or the next run) must
+     * start from nothing. Best effort: a leftover that cannot be dropped now is still reported as
+     * invalid by the next diff.
+     */
+    private function discardIndexLeftover(SchemaChange $change): void
+    {
+        if ($change->kind !== 'index' || $change->action === 'drop' || $change->transactional) {
+            return;
+        }
+
+        $db = $this->db();
+
+        try {
+            $previous = $db->selectOne("SELECT current_setting('lock_timeout') AS value");
+            $db->selectOne("SELECT set_config('lock_timeout', ?, false)", [$this->lockTimeout]);
+
+            try {
+                $db->getPdo()->exec($this->dropIndex($this->projectionSchema(), $change->subject));
+            } finally {
+                $db->selectOne("SELECT set_config('lock_timeout', ?, false)", [$previous === null ? '0' : (string) $previous->value]);
+            }
+        } catch (Throwable) {
+        }
     }
 
     /**
@@ -278,46 +354,74 @@ final readonly class SchemaSync
      */
     private function triggerChanges(SchemaPlan $plan): array
     {
-        $changes = [];
+        $targets = $this->existingTables($plan);
 
-        foreach ($plan->triggers as $rendered) {
-            if (! $this->tableExists($rendered->quotedTable)) {
-                continue;
-            }
-
-            try {
-                $inspected = $this->inspectTriggers($rendered);
-            } catch (QueryException $exception) {
-                if (($exception->errorInfo[0] ?? null) !== '55P03') {
-                    throw $exception;
-                }
-
-                // Cannot even read the table's triggers: leave it to the run, which retries the lock.
-                $changes[] = new SchemaChange('triggers', 'replace', $rendered->table, 'the table is locked and could not be inspected', $rendered->statements(), true, [$rendered->quotedTable], [], $rendered->stamps());
-
-                continue;
-            }
-
-            [$reasons, $exists] = $inspected;
-
-            if ($reasons === []) {
-                continue;
-            }
-
-            $changes[] = new SchemaChange(
-                'triggers',
-                $exists ? 'replace' : 'create',
-                $rendered->table,
-                implode('; ', $reasons),
-                $rendered->statements(),
-                true,
-                [$rendered->quotedTable],
-                [],
-                $rendered->stamps(),
-            );
+        if ($targets === []) {
+            return [];
         }
 
-        return $changes;
+        $db = $this->db();
+
+        return $this->underFixedSearchPath(function () use ($targets, $db): array {
+            $changes = [];
+
+            foreach ($targets as [$rendered, $tableOid]) {
+                try {
+                    // A savepoint per table: a lock timeout on one must not abort the pass.
+                    $inspected = $db->transaction(fn (): array => $this->inspectTriggers($rendered, $tableOid));
+                } catch (QueryException $exception) {
+                    if (($exception->errorInfo[0] ?? null) !== '55P03') {
+                        throw $exception;
+                    }
+
+                    // Cannot even read the table's triggers: leave it to the run, which retries the lock.
+                    $changes[] = new SchemaChange('triggers', 'replace', $rendered->table, 'the table is locked and could not be inspected', $rendered->statements(), true, [$rendered->quotedTable], [], $rendered->stamps());
+
+                    continue;
+                }
+
+                [$reasons, $exists] = $inspected;
+
+                if ($reasons === []) {
+                    continue;
+                }
+
+                $changes[] = new SchemaChange(
+                    'triggers',
+                    $exists ? 'replace' : 'create',
+                    $rendered->table,
+                    implode('; ', $reasons),
+                    $rendered->statements(),
+                    true,
+                    [$rendered->quotedTable],
+                    [],
+                    $rendered->stamps(),
+                );
+            }
+
+            return $changes;
+        });
+    }
+
+    /**
+     * The planned tables that exist, with their oids, resolved by the session's own path (the only
+     * place where an unqualified name still means something).
+     *
+     * @return list<array{RenderedTriggers, mixed}>
+     */
+    private function existingTables(SchemaPlan $plan): array
+    {
+        $targets = [];
+
+        foreach ($plan->triggers as $rendered) {
+            $oid = $this->db()->selectOne('SELECT to_regclass(?)::oid AS oid', [$rendered->quotedTable])?->oid;
+
+            if ($oid !== null) {
+                $targets[] = [$rendered, $oid];
+            }
+        }
+
+        return $targets;
     }
 
     /**
@@ -325,10 +429,8 @@ final readonly class SchemaSync
      *
      * @return array{list<string>, bool} The reasons, and whether the function exists.
      */
-    private function inspectTriggers(RenderedTriggers $rendered): array
+    private function inspectTriggers(RenderedTriggers $rendered, mixed $tableOid): array
     {
-        $this->db();
-
         $reasons = [];
         $function = $this->liveFunction($rendered->qualifiedFunction);
 
@@ -338,7 +440,7 @@ final readonly class SchemaSync
             $reasons[] = 'function differs from the definitions';
         }
 
-        $live = $this->liveTriggers($rendered->quotedTable);
+        $live = $this->liveTriggers($tableOid);
 
         foreach ($rendered->triggers as $name => $createSql) {
             $row = $live[$name] ?? null;
@@ -356,7 +458,7 @@ final readonly class SchemaSync
     }
 
     /**
-     * Runs a read under a fixed search_path. PostgreSQL qualifies the names in a rendered definition
+     * Runs a whole inspection pass under a fixed search_path (one transaction per pass, not per read). PostgreSQL qualifies the names in a rendered definition
      * by the session's path, so reading it under the caller's would make the same object look
      * different to different sessions (and the stamp written at install differ from the check).
      * Objects must be looked up by oid first: no name resolves under this path.
@@ -374,18 +476,16 @@ final readonly class SchemaSync
             $previous = $db->selectOne("SELECT current_setting('search_path') AS value");
             $db->selectOne("SELECT set_config('search_path', 'pg_catalog', true)");
 
-            $result = $read();
-            $db->selectOne("SELECT set_config('search_path', ?, true)", [$previous === null ? 'public' : (string) $previous->value]);
-
-            return $result;
+            try {
+                return $read();
+            } finally {
+                // The setting is local to the transaction, but a caller's outer transaction outlives this one.
+                try {
+                    $db->selectOne("SELECT set_config('search_path', ?, true)", [$previous === null ? 'public' : (string) $previous->value]);
+                } catch (Throwable) {
+                }
+            }
         });
-    }
-
-    private function definitionMd5(string $renderer, mixed $oid): string
-    {
-        $db = $this->db();
-
-        return (string) $this->underFixedSearchPath(fn () => $db->selectOne(sprintf('SELECT md5(%s(?::oid)) AS md5', $renderer), [$oid])?->md5);
     }
 
     /**
@@ -402,18 +502,18 @@ final readonly class SchemaSync
     }
 
     /**
+     * Reads under the path the surrounding pass has already fixed; the table is given by oid.
+     *
      * @return array<string, stdClass>
      */
-    private function liveTriggers(string $quotedTable): array
+    private function liveTriggers(mixed $tableOid): array
     {
-        $db = $this->db();
-        $table = $db->selectOne('SELECT to_regclass(?)::oid AS oid', [$quotedTable])?->oid;
         $live = [];
 
-        $rows = $this->underFixedSearchPath(fn (): array => $db->select(
+        $rows = $this->db()->select(
             "SELECT t.tgname AS name, t.tgenabled AS enabled, md5(pg_get_triggerdef(t.oid)) AS definition, d.description AS comment FROM pg_trigger t LEFT JOIN pg_description d ON d.objoid = t.oid AND d.classoid = 'pg_trigger'::regclass WHERE t.tgrelid = ?::oid AND NOT t.tgisinternal",
-            [$table],
-        ));
+            [$tableOid],
+        );
 
         foreach ($rows as $row) {
             $live[(string) $row->name] = $row;
@@ -424,17 +524,10 @@ final readonly class SchemaSync
 
     private function liveFunction(string $qualifiedFunction): ?stdClass
     {
-        $db = $this->db();
-        $oid = $db->selectOne('SELECT to_regprocedure(?)::oid AS oid', [$qualifiedFunction.'()'])?->oid;
-
-        if ($oid === null) {
-            return null;
-        }
-
-        return $this->underFixedSearchPath(fn (): ?stdClass => $db->selectOne(
-            "SELECT md5(pg_get_functiondef(p.oid)) AS definition, d.description AS comment FROM pg_proc p LEFT JOIN pg_description d ON d.objoid = p.oid AND d.classoid = 'pg_proc'::regclass WHERE p.oid = ?::oid",
-            [$oid],
-        ));
+        return $this->db()->selectOne(
+            "SELECT md5(pg_get_functiondef(p.oid)) AS definition, d.description AS comment FROM pg_proc p LEFT JOIN pg_description d ON d.objoid = p.oid AND d.classoid = 'pg_proc'::regclass WHERE p.oid = to_regprocedure(?)",
+            [$qualifiedFunction.'()'],
+        );
     }
 
     /**
@@ -448,21 +541,33 @@ final readonly class SchemaSync
         $sql = new TriggerSql($plan->schema, $this->names());
         $wanted = [];
         $changes = [];
+        $targets = $this->existingTables($plan);
 
         foreach ($plan->triggers as $rendered) {
             $wanted[$rendered->functionName] = true;
+        }
 
-            if (! $this->tableExists($rendered->quotedTable)) {
-                continue;
+        $db = $this->db();
+        $lives = $targets === [] ? [] : $this->underFixedSearchPath(function () use ($targets, $db): array {
+            $lives = [];
+
+            foreach ($targets as [$rendered, $tableOid]) {
+                try {
+                    $lives[$rendered->quotedTable] = $db->transaction(fn (): array => $this->liveTriggers($tableOid));
+                } catch (QueryException $exception) {
+                    if (($exception->errorInfo[0] ?? null) !== '55P03') {
+                        throw $exception;
+                    }
+                }
             }
 
-            try {
-                $live = $this->liveTriggers($rendered->quotedTable);
-            } catch (QueryException $exception) {
-                if (($exception->errorInfo[0] ?? null) !== '55P03') {
-                    throw $exception;
-                }
+            return $lives;
+        });
 
+        foreach ($targets as [$rendered]) {
+            $live = $lives[$rendered->quotedTable] ?? null;
+
+            if ($live === null) {
                 continue;
             }
 
@@ -517,7 +622,7 @@ final readonly class SchemaSync
             $comment = sprintf('COMMENT ON INDEX %s IS %s', Sql::ident($spec->name), TriggerSql::literal($spec->comment()));
 
             if ($row === null) {
-                $changes[] = new SchemaChange('index', 'create', $spec->name, 'index is missing', [$spec->createSql, $comment], false, $relations);
+                $changes[] = new SchemaChange('index', 'create', $spec->name, 'index is missing', [$spec->createSql], false, $relations, [], [], $comment);
 
                 continue;
             }
@@ -525,7 +630,7 @@ final readonly class SchemaSync
             $reason = (int) $row->valid !== 1 ? 'index is invalid (an interrupted build)' : ($row->comment !== $spec->comment() ? 'index differs from the plan' : null);
 
             if ($reason !== null) {
-                $changes[] = new SchemaChange('index', 'replace', $spec->name, $reason, [$this->dropIndex($plan->schema, $spec->name), $spec->createSql, $comment], false, $relations);
+                $changes[] = new SchemaChange('index', 'replace', $spec->name, $reason, [$this->dropIndex($plan->schema, $spec->name), $spec->createSql], false, $relations, [], [], $comment);
             }
         }
 
@@ -665,8 +770,8 @@ final readonly class SchemaSync
     private function markedRoutines(): array
     {
         $rows = $this->db()->select(
-            "SELECT p.oid::regprocedure::text AS routine, p.proname AS name FROM pg_proc p JOIN pg_description d ON d.objoid = p.oid AND d.classoid = 'pg_proc'::regclass WHERE p.pronamespace = to_regnamespace((SELECT s FROM unnest(current_schemas(false)) s WHERE s <> 'pg_catalog' LIMIT 1)) AND starts_with(p.proname, ?) AND starts_with(d.description, ?)",
-            [$this->names()->prefix(), Marker::PREFIX],
+            "SELECT p.oid::regprocedure::text AS routine, p.proname AS name FROM pg_proc p JOIN pg_description d ON d.objoid = p.oid AND d.classoid = 'pg_proc'::regclass WHERE p.pronamespace = to_regnamespace(?) AND starts_with(p.proname, ?) AND starts_with(d.description, ?)",
+            [$this->projectionSchema(), $this->names()->prefix(), Marker::PREFIX],
         );
 
         return array_values(array_map(static fn (stdClass $row): array => ['routine' => (string) $row->routine, 'name' => (string) $row->name], $rows));
@@ -675,6 +780,18 @@ final readonly class SchemaSync
     private function tableExists(string $quotedTable): bool
     {
         return $this->db()->selectOne('SELECT to_regclass(?) IS NOT NULL AS present', [$quotedTable])?->present === true;
+    }
+
+    /**
+     * The schema of the projection: the one the changes table, which the trigger functions write to,
+     * lives in. Taken from the table itself so that no session's search_path can move it; before the
+     * tables exist, from the first schema of the current path.
+     */
+    private function projectionSchema(): string
+    {
+        $row = $this->db()->selectOne('SELECT n.nspname AS schema FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(?)', [Sql::ident($this->names()->changes())]);
+
+        return $row?->schema !== null ? (string) $row->schema : $this->currentSchema();
     }
 
     private function currentSchema(): string
