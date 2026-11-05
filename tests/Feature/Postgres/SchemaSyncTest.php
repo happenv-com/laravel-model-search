@@ -120,6 +120,25 @@ it('stamps the plan hash on an index, and the plan hash with the live definition
         ->and($function)->toMatch('/^model-search:[0-9a-f]{64}:[0-9a-f]{32}$/');
 });
 
+it('stamps definitions rendered under a fixed search_path, so the session path never causes drift', function (): void {
+    $stamped = DB::selectOne("SELECT d.description AS comment, t.oid FROM pg_trigger t JOIN pg_description d ON d.objoid = t.oid WHERE t.tgname = 'model_search_orders_ins'");
+
+    DB::transaction(function () use ($stamped): void {
+        DB::statement('SET LOCAL search_path = pg_catalog');
+        $fixed = DB::selectOne('SELECT md5(pg_get_triggerdef(?::oid)) AS md5', [$stamped->oid])->md5;
+
+        expect($stamped->comment)->toEndWith(':'.$fixed);
+    });
+
+    foreach (['public, pg_catalog', 'pg_catalog, public', 'public'] as $path) {
+        DB::statement('SET search_path = '.$path);
+        $diff = sync()->diff();
+        DB::statement('SET search_path = public');
+
+        expect($diff)->toBe([], $path);
+    }
+});
+
 it('--check fails on drift', function (): void {
     $this->artisan('model-search:sync', ['--check' => true])->assertSuccessful();
 

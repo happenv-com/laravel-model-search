@@ -12,6 +12,9 @@ use Illuminate\Console\Command;
 
 /**
  * Brings the triggers and indexes derived from the registered definitions in step with the database.
+ *
+ * Run it on a direct database connection: it holds a session advisory lock for the whole run,
+ * which a transaction-pooled connection cannot keep.
  */
 final class SyncCommand extends Command
 {

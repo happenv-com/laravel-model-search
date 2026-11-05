@@ -34,7 +34,9 @@ use stdClass;
  * a table that stays locked is left for later while the rest, indexes included, is installed, and
  * the run ends with one {@see SchemaSyncIncomplete}. Indexes are built with CONCURRENTLY, outside
  * any transaction; a failed build leaves an invalid index, which the next run drops and rebuilds.
- * Concurrent runs are serialised by a session advisory lock; the second one does nothing.
+ * Concurrent runs are serialised by a session advisory lock; the second one does nothing. Because
+ * that lock belongs to the database session, the sync must run on a direct connection, not through
+ * a transaction-pooled one (PgBouncer in transaction mode may hand the unlock to another backend).
  *
  * Nothing is dropped by {@see apply()} (and so never on a deploy: the previous release may still
  * need an object the new plan no longer has). What is no longer planned is reported by
@@ -261,11 +263,11 @@ final readonly class SchemaSync
         $db = $this->db();
 
         if ($stamp['kind'] === 'function') {
-            $row = $db->selectOne('SELECT md5(pg_get_functiondef(to_regprocedure(?))) AS md5', [$stamp['name'].'()']);
-            $statement = sprintf('COMMENT ON FUNCTION %s() IS %s', $stamp['name'], TriggerSql::literal(Marker::of($stamp['sql'], (string) $row?->md5)));
+            $oid = $db->selectOne('SELECT to_regprocedure(?)::oid AS oid', [$stamp['name'].'()'])?->oid;
+            $statement = sprintf('COMMENT ON FUNCTION %s() IS %s', $stamp['name'], TriggerSql::literal(Marker::of($stamp['sql'], $this->definitionMd5('pg_get_functiondef', $oid))));
         } else {
-            $row = $db->selectOne('SELECT md5(pg_get_triggerdef(t.oid)) AS md5 FROM pg_trigger t WHERE t.tgrelid = to_regclass(?) AND t.tgname = ?', [$stamp['on'], $stamp['name']]);
-            $statement = sprintf('COMMENT ON TRIGGER %s ON %s IS %s', Sql::ident($stamp['name']), $stamp['on'], TriggerSql::literal(Marker::of($stamp['sql'], (string) $row?->md5)));
+            $oid = $db->selectOne('SELECT t.oid AS oid FROM pg_trigger t WHERE t.tgrelid = to_regclass(?) AND t.tgname = ?', [$stamp['on'], $stamp['name']])?->oid;
+            $statement = sprintf('COMMENT ON TRIGGER %s ON %s IS %s', Sql::ident($stamp['name']), $stamp['on'], TriggerSql::literal(Marker::of($stamp['sql'], $this->definitionMd5('pg_get_triggerdef', $oid))));
         }
 
         $db->getPdo()->exec($statement);
@@ -325,15 +327,12 @@ final readonly class SchemaSync
      */
     private function inspectTriggers(RenderedTriggers $rendered): array
     {
-        $db = $this->db();
+        $this->db();
 
         $reasons = [];
-        $function = $db->selectOne(
-            "SELECT md5(pg_get_functiondef(p.oid)) AS definition, d.description AS comment FROM pg_proc p LEFT JOIN pg_description d ON d.objoid = p.oid AND d.classoid = 'pg_proc'::regclass WHERE p.oid = to_regprocedure(?)",
-            [$rendered->qualifiedFunction.'()'],
-        );
+        $function = $this->liveFunction($rendered->qualifiedFunction);
 
-        if ($function === null) {
+        if (! $function instanceof stdClass) {
             $reasons[] = 'function is missing';
         } elseif (! $this->matches($function->comment, $rendered->functionSql, (string) $function->definition)) {
             $reasons[] = 'function differs from the definitions';
@@ -353,7 +352,40 @@ final readonly class SchemaSync
             }
         }
 
-        return [$reasons, $function !== null];
+        return [$reasons, $function instanceof stdClass];
+    }
+
+    /**
+     * Runs a read under a fixed search_path. PostgreSQL qualifies the names in a rendered definition
+     * by the session's path, so reading it under the caller's would make the same object look
+     * different to different sessions (and the stamp written at install differ from the check).
+     * Objects must be looked up by oid first: no name resolves under this path.
+     *
+     * @template T
+     *
+     * @param  callable(): T  $read
+     * @return T
+     */
+    private function underFixedSearchPath(callable $read): mixed
+    {
+        $db = $this->db();
+
+        return $db->transaction(function () use ($db, $read): mixed {
+            $previous = $db->selectOne("SELECT current_setting('search_path') AS value");
+            $db->selectOne("SELECT set_config('search_path', 'pg_catalog', true)");
+
+            $result = $read();
+            $db->selectOne("SELECT set_config('search_path', ?, true)", [$previous === null ? 'public' : (string) $previous->value]);
+
+            return $result;
+        });
+    }
+
+    private function definitionMd5(string $renderer, mixed $oid): string
+    {
+        $db = $this->db();
+
+        return (string) $this->underFixedSearchPath(fn () => $db->selectOne(sprintf('SELECT md5(%s(?::oid)) AS md5', $renderer), [$oid])?->md5);
     }
 
     /**
@@ -374,16 +406,35 @@ final readonly class SchemaSync
      */
     private function liveTriggers(string $quotedTable): array
     {
+        $db = $this->db();
+        $table = $db->selectOne('SELECT to_regclass(?)::oid AS oid', [$quotedTable])?->oid;
         $live = [];
 
-        foreach ($this->db()->select(
-            "SELECT t.tgname AS name, t.tgenabled AS enabled, md5(pg_get_triggerdef(t.oid)) AS definition, d.description AS comment FROM pg_trigger t LEFT JOIN pg_description d ON d.objoid = t.oid AND d.classoid = 'pg_trigger'::regclass WHERE t.tgrelid = to_regclass(?) AND NOT t.tgisinternal",
-            [$quotedTable],
-        ) as $row) {
+        $rows = $this->underFixedSearchPath(fn (): array => $db->select(
+            "SELECT t.tgname AS name, t.tgenabled AS enabled, md5(pg_get_triggerdef(t.oid)) AS definition, d.description AS comment FROM pg_trigger t LEFT JOIN pg_description d ON d.objoid = t.oid AND d.classoid = 'pg_trigger'::regclass WHERE t.tgrelid = ?::oid AND NOT t.tgisinternal",
+            [$table],
+        ));
+
+        foreach ($rows as $row) {
             $live[(string) $row->name] = $row;
         }
 
         return $live;
+    }
+
+    private function liveFunction(string $qualifiedFunction): ?stdClass
+    {
+        $db = $this->db();
+        $oid = $db->selectOne('SELECT to_regprocedure(?)::oid AS oid', [$qualifiedFunction.'()'])?->oid;
+
+        if ($oid === null) {
+            return null;
+        }
+
+        return $this->underFixedSearchPath(fn (): ?stdClass => $db->selectOne(
+            "SELECT md5(pg_get_functiondef(p.oid)) AS definition, d.description AS comment FROM pg_proc p LEFT JOIN pg_description d ON d.objoid = p.oid AND d.classoid = 'pg_proc'::regclass WHERE p.oid = ?::oid",
+            [$oid],
+        ));
     }
 
     /**
@@ -614,7 +665,7 @@ final readonly class SchemaSync
     private function markedRoutines(): array
     {
         $rows = $this->db()->select(
-            "SELECT p.oid::regprocedure::text AS routine, p.proname AS name FROM pg_proc p JOIN pg_description d ON d.objoid = p.oid AND d.classoid = 'pg_proc'::regclass WHERE p.pronamespace = to_regnamespace(current_schema()) AND starts_with(p.proname, ?) AND starts_with(d.description, ?)",
+            "SELECT p.oid::regprocedure::text AS routine, p.proname AS name FROM pg_proc p JOIN pg_description d ON d.objoid = p.oid AND d.classoid = 'pg_proc'::regclass WHERE p.pronamespace = to_regnamespace((SELECT s FROM unnest(current_schemas(false)) s WHERE s <> 'pg_catalog' LIMIT 1)) AND starts_with(p.proname, ?) AND starts_with(d.description, ?)",
             [$this->names()->prefix(), Marker::PREFIX],
         );
 
@@ -628,7 +679,7 @@ final readonly class SchemaSync
 
     private function currentSchema(): string
     {
-        $row = $this->db()->selectOne('SELECT current_schema() AS schema');
+        $row = $this->db()->selectOne("SELECT s AS schema FROM unnest(current_schemas(false)) s WHERE s <> 'pg_catalog' LIMIT 1");
 
         return $row === null ? 'public' : (string) $row->schema;
     }
