@@ -184,12 +184,21 @@ final readonly class Doctor
 
         try {
             $db->transaction(function () use ($db, $keys, $entries, $timeout, &$rows, &$logged): void {
-                $previous = $db->selectOne("SELECT current_setting('max_parallel_workers_per_gather') AS parallel, current_setting('statement_timeout') AS timeout");
+                $previous = $db->selectOne("SELECT current_setting('max_parallel_workers_per_gather') AS parallel, current_setting('statement_timeout') AS timeout, current_setting('log_parameter_max_length_on_error') AS logged");
 
                 $db->statement('SET LOCAL max_parallel_workers_per_gather = 0');
                 $db->statement('SET LOCAL statement_timeout = '.$timeout);
-                $db->statement('SET LOCAL log_parameter_max_length_on_error = 0');
-                $logged = $db->selectOne("SELECT current_setting('log_parameter_max_length_on_error') AS value")?->value;
+
+                try {
+                    // A savepoint of its own: a refusal must not abort the checks below.
+                    $logged = $db->transaction(static function () use ($db): mixed {
+                        $db->statement('SET LOCAL log_parameter_max_length_on_error = 0');
+
+                        return $db->selectOne("SELECT current_setting('log_parameter_max_length_on_error') AS value")?->value;
+                    });
+                } catch (QueryException) {
+                    $logged = null;
+                }
 
                 $rows = $db->select(sprintf(
                     'SELECT k."subject_type", count(*) FILTER (WHERE e."subject_id" IS NULL) AS "orphans", count(*) FILTER (WHERE e."subject_id" IS NOT NULL AND k."stage" IS DISTINCT FROM e."stage") AS "drifted" FROM %1$s k LEFT JOIN %2$s e ON e."subject_type" = k."subject_type" AND e."subject_id" = k."subject_id" GROUP BY k."subject_type" ORDER BY k."subject_type"',
@@ -198,7 +207,7 @@ final readonly class Doctor
                 ));
 
                 // `SET LOCAL` outlives a released savepoint, so a caller's transaction gets its values back.
-                foreach (['max_parallel_workers_per_gather' => $previous->parallel ?? null, 'statement_timeout' => $previous->timeout ?? null] as $name => $value) {
+                foreach (['max_parallel_workers_per_gather' => $previous->parallel ?? null, 'statement_timeout' => $previous->timeout ?? null, 'log_parameter_max_length_on_error' => $previous->logged ?? null] as $name => $value) {
                     if (is_string($value)) {
                         $db->selectOne('SELECT set_config(?, ?, true)', [$name, $value]);
                     }

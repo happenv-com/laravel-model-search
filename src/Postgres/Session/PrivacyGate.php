@@ -113,9 +113,20 @@ final class PrivacyGate
      */
     public function inspect(Connection $connection): PrivacyVerdict
     {
+        // Inside a transaction a failed read must not abort it: read under a savepoint of its own.
+        $pdo = $connection->getPdo();
+        $inTransaction = $pdo->inTransaction();
+        $open = $inTransaction ? ['SAVEPOINT model_search_settings'] : [];
+        $release = $inTransaction ? ['RELEASE SAVEPOINT model_search_settings'] : [];
+        $undo = $inTransaction ? ['ROLLBACK TO SAVEPOINT model_search_settings', 'RELEASE SAVEPOINT model_search_settings'] : [];
+
         try {
+            array_map($pdo->exec(...), $open);
             $rows = $connection->select('SELECT "name", "setting", "vartype" FROM pg_settings WHERE "name" = ANY(?::text[])', [Sql::arrayLiteral(self::SETTINGS)]);
+            array_map($pdo->exec(...), $release);
         } catch (QueryException) {
+            array_map($pdo->exec(...), $undo);
+
             return new PrivacyVerdict(['the server settings could not be read, so whether a phrase could be logged is unknown']);
         }
 

@@ -115,3 +115,13 @@ it('a beforeExecuting callback of the host never sees the phrase', function (): 
 
     expect(implode('', $seen))->not->toContain('SECRETPHRASE');
 });
+
+it('puts the trigram threshold back inside a host transaction', function (): void {
+    $before = DB::selectOne("SELECT current_setting('pg_trgm.word_similarity_threshold', true) AS value")->value;
+
+    app(SearchSession::class)->run('pgsql', 100, static fn (): int => 1);
+
+    $after = DB::selectOne("SELECT current_setting('pg_trgm.word_similarity_threshold', true) AS value")->value;
+
+    expect($after)->toBe($before ?? '0.6');
+});

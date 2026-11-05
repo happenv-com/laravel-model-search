@@ -89,7 +89,12 @@ final class SearchSession
         } finally {
             // Outside the search transaction: a listener may write to the database.
             foreach ($announcements as $announce) {
-                $announce();
+                try {
+                    $announce();
+                } catch (Throwable $listenerFailure) {
+                    // A failing listener must neither replace the search's outcome nor skip the others.
+                    report($listenerFailure);
+                }
             }
         }
     }
@@ -219,15 +224,29 @@ final class SearchSession
 
         // A deadlock or serialization failure inside the host's own transaction is the host's to retry.
         if (in_array($state, ['40001', '40P01'], true) && $connection->getPdo()->inTransaction()) {
-            return new DeadlockException('The search was chosen as the victim of a deadlock or serialization failure.');
+            return $this->retryable();
         }
 
         return new SearchFailed(sprintf('The search statement failed (SQLSTATE %s).', $state));
     }
 
+    /**
+     * A deadlock Laravel recognises as one, so the host's transaction retries: its detector looks at
+     * the code (`40001`) and at PostgreSQL's wording, not at the class.
+     */
+    private function retryable(): DeadlockException
+    {
+        $exception = new DeadlockException('deadlock detected (SQLSTATE 40P01 or 40001); the search was the victim');
+        (function (): void {
+            $this->code = '40001';
+        })->call($exception);
+
+        return $exception;
+    }
+
     private function stateOf(Throwable $exception): string
     {
-        for ($current = $exception; $current !== null; $current = $current->getPrevious()) {
+        for ($current = $exception; $current instanceof Throwable; $current = $current->getPrevious()) {
             if ($current instanceof PDOException && isset($current->errorInfo[0]) && is_string($current->errorInfo[0])) {
                 return $current->errorInfo[0];
             }
@@ -252,7 +271,8 @@ final class SearchSession
         $values = [
             'max_parallel_workers_per_gather' => $row->parallel ?? null,
             'statement_timeout' => $row->timeout ?? null,
-            'pg_trgm.word_similarity_threshold' => $row->threshold ?? null,
+            // Not loaded yet in this session: the module's own default is what loading it will give.
+            'pg_trgm.word_similarity_threshold' => $row->threshold ?? '0.6',
             'log_parameter_max_length_on_error' => $row->logged ?? null,
         ];
 

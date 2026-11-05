@@ -17,8 +17,9 @@ use Illuminate\Support\Collection;
  * Executes a {@see SearchQuery}. The query has already refused to run unscoped.
  *
  * A driver runs its phrase-carrying statements through `SearchSession`, calls `$query->charge()`
- * (the viewer's rate limit) before the first statement it will actually run, and reports the number
- * of records `apply()` matched with `$query->matched()`.
+ * (the viewer's rate limit) exactly once per call, before the first statement it will actually run
+ * (never when it runs none), and reports the number of records `apply()` matched with
+ * `$query->matched()`, once per `apply()` call.
  */
 interface Driver
 {

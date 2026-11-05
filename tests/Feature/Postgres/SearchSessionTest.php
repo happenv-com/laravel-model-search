@@ -10,8 +10,11 @@ use Happenv\ModelSearch\Postgres\Session\PrivacyGate;
 use Happenv\ModelSearch\Postgres\Session\SearchConnectionFactory;
 use Happenv\ModelSearch\Postgres\Session\SearchSession;
 use Happenv\ModelSearch\Tests\Fixtures\Session\IgnoringParameterLogFactory;
+use Happenv\ModelSearch\Tests\Fixtures\Session\UnreadableSettingsFactory;
 use Happenv\ModelSearch\Tests\TruncationTestCase;
+use Illuminate\Database\ConcurrencyErrorDetector;
 use Illuminate\Database\Connection;
+use Illuminate\Database\DeadlockException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
@@ -196,4 +199,110 @@ it('dispatches the privacy event after the search transaction ended', function (
 
     expect(DB::table('orders')->where('signature', 'EVENT-WRITE')->count())->toBe(1);
     DB::table('orders')->where('signature', 'EVENT-WRITE')->delete();
+});
+
+it('searches in warn mode even when the settings cannot be read', function (): void {
+    config(['model-search.privacy' => 'warn']);
+    app()->instance(SearchConnectionFactory::class, new UnreadableSettingsFactory);
+
+    expect(ssRun(300, static fn (Connection $connection): int => (int) $connection->selectOne('SELECT 1 AS one')->one))->toBe(1);
+});
+
+it('lets a throwing listener neither replace the outcome nor stop the other announcements', function (): void {
+    config(['model-search.privacy' => 'warn']);
+    DB::statement("SET log_statement = 'all'");
+    $later = 0;
+    Event::listen(SearchPrivacyUnsafe::class, static function (): never {
+        throw new RuntimeException('listener failed');
+    });
+
+    expect(ssRun(300, static fn (): string => 'result'))->toBe('result');
+
+    DB::statement("SET log_statement = 'none'");
+    app(PrivacyGate::class)->flush();
+    DB::statement("SET log_statement = 'all'");
+    config(['model-search.privacy' => 'refuse']);
+
+    expect(static fn () => ssRun(300, static fn (): string => 'never'))->toThrow(SearchPrivacyUnavailable::class);
+});
+
+function ssSnapshot(): void
+{
+    DB::statement('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    DB::select('SELECT 1');
+}
+
+function ssConcurrentUpdate(string $id): void
+{
+    DB::connectUsing('ss_other', config('database.connections.pgsql'));
+    DB::connection('ss_other')->update("UPDATE orders SET state = 'shipped' WHERE id = ?", [$id]);
+    DB::purge('ss_other');
+}
+
+/**
+ * A search that runs into a genuine serialization failure on its first attempt.
+ */
+function ssSerializationFailure(string $id, int &$attempts, bool $isolate = true): void
+{
+    $attempts++;
+
+    if ($isolate) {
+        ssSnapshot();
+    }
+
+    if ($attempts === 1) {
+        ssConcurrentUpdate($id);
+    }
+
+    app(SearchSession::class)->run('pgsql', 300, static fn (Connection $connection): int => $connection->update("UPDATE orders SET state = 'unshipped' WHERE id = ? AND ? <> ''", [$id, 'SECRETPHRASE']));
+}
+
+it('lets Laravel retry a host transaction the search was the victim of', function (): void {
+    $id = (string) Str::uuid();
+    DB::table('orders')->insert(['id' => $id, 'signature' => 'RETRY-1', 'state' => 'unshipped']);
+    $attempts = 0;
+
+    DB::transaction(static function () use ($id, &$attempts): void {
+        ssSerializationFailure($id, $attempts);
+    }, 2);
+
+    expect($attempts)->toBe(2)
+        ->and(DB::table('orders')->where('id', $id)->value('state'))->toBe('unshipped');
+    DB::table('orders')->where('id', $id)->delete();
+});
+
+it('lets the outer transaction retry when the search failed in a nested one', function (): void {
+    $id = (string) Str::uuid();
+    DB::table('orders')->insert(['id' => $id, 'signature' => 'RETRY-2', 'state' => 'unshipped']);
+    $attempts = 0;
+
+    DB::transaction(static function () use ($id, &$attempts): void {
+        ssSnapshot();
+
+        DB::transaction(static function () use ($id, &$attempts): void {
+            ssSerializationFailure($id, $attempts, false);
+        });
+    }, 2);
+
+    expect($attempts)->toBe(2);
+    DB::table('orders')->where('id', $id)->delete();
+});
+
+it('makes the rethrown deadlock detectable without the phrase', function (): void {
+    $caught = null;
+    DB::statement("CREATE FUNCTION pg_temp.boom3(text) RETURNS int LANGUAGE plpgsql AS \$\$ BEGIN RAISE EXCEPTION 'x %', \$1 USING ERRCODE = '40P01'; END \$\$");
+    DB::beginTransaction();
+
+    try {
+        ssRun(300, static fn (Connection $connection): array => $connection->select('SELECT pg_temp.boom3(?)', ['SECRETPHRASE']));
+    } catch (Throwable $exception) {
+        $caught = $exception;
+    } finally {
+        DB::rollBack();
+    }
+
+    expect($caught)->toBeInstanceOf(DeadlockException::class)
+        ->and(new ConcurrencyErrorDetector()->causedByConcurrencyError($caught))->toBeTrue()
+        ->and($caught->getMessage())->not->toContain('SECRETPHRASE')
+        ->and($caught->getPrevious())->toBeNull();
 });

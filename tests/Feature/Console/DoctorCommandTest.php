@@ -8,6 +8,7 @@ use Happenv\ModelSearch\Postgres\Indexing\SearchIndexer;
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Postgres\Session\PrivacyGate;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -136,4 +137,25 @@ it('reports a type that is not installed or installed for another definition', f
     sort($codes);
 
     expect($codes)->toBe(['fingerprint-differs', 'type-not-installed']);
+});
+
+it('reports a privacy finding and still runs the key checks when parameter logging cannot be switched off', function (): void {
+    $id = dcOrder();
+    app(SearchIndexer::class)->drainNow();
+    DB::table(dcTable('keys'))->where('subject_id', $id)->update(['stage' => 5]);
+    DB::connection()->beforeExecuting(static function (string $query): void {
+        if (str_contains($query, 'SET LOCAL log_parameter_max_length_on_error')) {
+            throw new QueryException('pgsql', $query, [], new PDOException('refused'));
+        }
+    });
+
+    expect(dcCodes())->toBe(['privacy', 'key-stage-drift']);
+});
+
+it('puts the parameter logging setting back after the key checks', function (): void {
+    DB::statement('SET LOCAL log_parameter_max_length_on_error = 77');
+
+    dcCodes();
+
+    expect((string) DB::selectOne("SELECT current_setting('log_parameter_max_length_on_error') AS value")->value)->toBe('77B');
 });
