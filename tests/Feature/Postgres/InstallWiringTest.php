@@ -119,8 +119,12 @@ it('the sync command only warns about a downgrade, like the migration listener',
     DB::table(iwState())->insert(['subject_type' => 'order', 'definition_fingerprint' => 'other', 'definition_version' => 5, 'installed_at' => now()]);
     Log::spy();
 
-    expect(Artisan::call('model-search:sync'))->toBe(0)
-        ->and(Artisan::output())->toContain('older');
+    $exit = Artisan::call('model-search:sync');
+    $output = Artisan::output();
+
+    expect($exit)->toBe(0)
+        ->and($output)->toContain('WARN')->toContain('older')
+        ->and($output)->not->toContain('ERROR');
 
     app(SyncAfterMigrations::class)->handle(new MigrationsEnded('up', []));
 
@@ -140,7 +144,12 @@ it('the sync command fails when a downgrade comes with another kind of refusal',
         ['subject_type' => 'product', 'definition_fingerprint' => 'other', 'definition_version' => 1, 'installed_at' => now()],
     ]);
 
-    expect(Artisan::call('model-search:sync'))->toBe(1);
+    $exit = Artisan::call('model-search:sync');
+    $output = Artisan::output();
+
+    expect($exit)->toBe(1)
+        ->and($output)->toMatch('/WARN.*older/s')
+        ->and($output)->toMatch('/ERROR.*different fingerprint/s');
 });
 
 it('a foreign fingerprint at the same version fails the listener too', function (): void {

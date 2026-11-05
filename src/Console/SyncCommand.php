@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Console;
 
+use Happenv\ModelSearch\Exceptions\InstallRefused;
 use Happenv\ModelSearch\Exceptions\SchemaNotInstalled;
 use Happenv\ModelSearch\Exceptions\SchemaSyncIncomplete;
 use Happenv\ModelSearch\Postgres\Schema\SchemaChange;
@@ -36,6 +37,10 @@ final class SyncCommand extends Command
         } catch (SchemaNotInstalled|SchemaSyncIncomplete $exception) {
             $this->components->error($exception->getMessage());
 
+            if ($exception instanceof SchemaSyncIncomplete) {
+                $this->printRefusals($exception->refusals);
+            }
+
             return self::FAILURE;
         }
 
@@ -55,11 +60,25 @@ final class SyncCommand extends Command
             }
         }
 
-        // A downgrade is an older release running the command (a blue/green deploy): it leaves the
-        // type alone and must not fail, as the listener that runs after migrations does not.
+        $failed = $this->printRefusals($outcome->refusals);
+
+        $this->components->info($outcome->applied === [] ? 'Triggers and indexes are in sync.' : sprintf('%d change(s) applied.', count($outcome->applied)));
+
+        return $failed ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * A downgrade is an older release running the command (a blue/green deploy): it leaves the
+     * type alone and is only a warning, as in the listener that runs after migrations.
+     *
+     * @param  list<InstallRefused>  $refusals
+     * @return bool Whether any refusal was not a downgrade.
+     */
+    private function printRefusals(array $refusals): bool
+    {
         $failed = false;
 
-        foreach ($outcome->refusals as $refusal) {
+        foreach ($refusals as $refusal) {
             if ($refusal->isDowngrade) {
                 $this->components->warn($refusal->getMessage());
 
@@ -70,9 +89,7 @@ final class SyncCommand extends Command
             $failed = true;
         }
 
-        $this->components->info($outcome->applied === [] ? 'Triggers and indexes are in sync.' : sprintf('%d change(s) applied.', count($outcome->applied)));
-
-        return $failed ? self::FAILURE : self::SUCCESS;
+        return $failed;
     }
 
     private function report(SchemaSync $sync): int
