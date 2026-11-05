@@ -46,11 +46,11 @@ abstract class ModelSearch
     }
 
     /**
-     * Whether the database driver may serve this model when no index is ready.
+     * Whether the database driver may serve this model while its index is being built; without it only the `exactOnSource` columns are searched meanwhile.
      */
     public function fallback(): bool
     {
-        return false;
+        return true;
     }
 
     /**

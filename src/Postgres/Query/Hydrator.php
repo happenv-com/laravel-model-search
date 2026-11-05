@@ -73,10 +73,24 @@ final class Hydrator
                 ),
             );
 
-            $results[] = new SearchResult($model, $reveal->apply($match, $model, $viewer));
+            $results[] = new SearchResult($model, self::named($reveal->apply($match, $model, $viewer), $definition));
         }
 
         return $results;
+    }
+
+    /**
+     * The name words belong to the name fields that match by prefix: reported under the first of
+     * them (the reveal rules have already been applied to the word). `name_word` stays inside.
+     */
+    private static function named(SearchMatch $match, CompiledDefinition $definition): SearchMatch
+    {
+        $first = array_find($definition->fields, static fn (CompiledField $field): bool => $field->type === FieldType::Name && in_array(Mode::Prefix, $field->modes, true));
+        $rename = static fn (SearchMatch $item): SearchMatch => $item->kind === SearchField::RESERVED_KIND && $first instanceof CompiledField
+            ? new SearchMatch($first->kind, $item->label, $item->value, $item->mode, $item->stage, $item->via, $item->alternatives)
+            : $item;
+
+        return $rename($match)->withAlternatives(array_map($rename, $match->alternatives));
     }
 
     /**

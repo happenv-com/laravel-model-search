@@ -31,7 +31,7 @@ final readonly class CompiledDefinition
         public array $stages,
         public ?string $sortAt,
         public ?string $partition,
-        public bool $fallback = false,
+        public bool $fallback = true,
         public int $version = 1,
         public array $withScopes = [],
         public ?string $keySqlType = null,

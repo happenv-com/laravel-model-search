@@ -118,6 +118,7 @@ return new class extends Migration
             $table->text('number');
             $table->text('external_reference')->nullable();
             $table->uuid('order_id')->nullable();
+            $table->bigInteger('tenant_id')->nullable();
             $table->timestampsTz(6);
             $table->index('order_id');
         });

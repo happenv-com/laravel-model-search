@@ -117,7 +117,8 @@ fl AS (
   SELECT c.ti,
     bool_or(c.is_full AND c.bk = %4$d) AS s0_full,
     bool_or(c.is_full AND c.bk IN (%5$d, %4$d)) AS any_full,
-    bool_or(c.is_full AND c.bk = %6$d) AS all_full
+    bool_or(c.is_full AND c.bk = %6$d) AS all_full,
+    bool_or(c.ptr) AS via_full
   FROM cand c GROUP BY c.ti
 ),
 ty(ti, alias, staged, lim) AS (VALUES %7$s),
@@ -133,13 +134,13 @@ ranked AS (
   WHERE NOT ty.staged OR a.level %% %9$d = 0 OR a.in_s0 OR (a.ne_s0 = 0 AND NOT fl.s0_full)
 )
 SELECT 'row' AS rt, r.ti, r.subject_id, r.level, r.kind, r.value, r.via, r.alts::text AS alts, r.in_s0, CAST(r.rn AS integer) AS rn,
-  CAST(NULL AS bigint) AS n_pass, CAST(NULL AS bigint) AS ne_s0, CAST(NULL AS boolean) AS s0_full, CAST(NULL AS boolean) AS any_full, CAST(NULL AS boolean) AS all_full
+  CAST(NULL AS bigint) AS n_pass, CAST(NULL AS bigint) AS ne_s0, CAST(NULL AS boolean) AS s0_full, CAST(NULL AS boolean) AS any_full, CAST(NULL AS boolean) AS all_full, CAST(NULL AS boolean) AS via_full
 FROM ranked r JOIN ty ON ty.ti = r.ti WHERE r.rn <= ty.lim
 UNION ALL
 SELECT 'flag', ty.ti, CAST(NULL AS text), CAST(NULL AS integer), CAST(NULL AS text), CAST(NULL AS text), CAST(NULL AS text), CAST(NULL AS text), CAST(NULL AS boolean), CAST(NULL AS integer),
   (SELECT count(*) FROM ranked r WHERE r.ti = ty.ti),
   (SELECT count(*) FROM au x WHERE x.ti = ty.ti AND x.level %% %9$d > 0 AND x.in_s0),
-  coalesce(f.s0_full, false), coalesce(f.any_full, false), coalesce(f.all_full, false)
+  coalesce(f.s0_full, false), coalesce(f.any_full, false), coalesce(f.all_full, false), coalesce(f.via_full, false)
 FROM ty LEFT JOIN fl f ON f.ti = ty.ti
 SQL,
             $weights->sql,
@@ -200,6 +201,7 @@ SQL,
                 self::bool($flag['s0_full'] ?? null),
                 self::bool($flag['any_full'] ?? null),
                 self::bool($flag['all_full'] ?? null),
+                self::bool($flag['via_full'] ?? null),
                 $limits[$alias] ?? 0,
             );
         }

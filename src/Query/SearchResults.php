@@ -21,12 +21,22 @@ final readonly class SearchResults implements Countable, IteratorAggregate
     /**
      * @param  list<SearchResult>  $items
      * @param  string|null  $stage  The stage key the results come from; null when stages did not apply.
+     * @param  bool  $indexBuilding  Some type of the search is not indexed completely yet, so the answer may be partial.
      */
     public function __construct(
         public array $items = [],
         public bool $timedOut = false,
         public ?string $stage = null,
+        public bool $indexBuilding = false,
     ) {}
+
+    /**
+     * The same results, told that the index of some type of the call is still being built.
+     */
+    public function whileIndexBuilding(): self
+    {
+        return new self($this->items, $this->timedOut, $this->stage, true);
+    }
 
     /**
      * @return Traversable<int, SearchResult>

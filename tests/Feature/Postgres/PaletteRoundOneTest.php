@@ -9,6 +9,7 @@ use Happenv\ModelSearch\Exceptions\PartitionMissing;
 use Happenv\ModelSearch\Exceptions\SearchFailed;
 use Happenv\ModelSearch\Exceptions\SearchScopeMissing;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
+use Happenv\ModelSearch\Exceptions\UnsupportedQuery;
 use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Happenv\ModelSearch\Postgres\Indexing\SearchIndexer;
 use Happenv\ModelSearch\Postgres\Query\PostgresDriver;
@@ -25,13 +26,17 @@ use Happenv\ModelSearch\Tests\Fixtures\Models\Invoice;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Parcel;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Product;
+use Happenv\ModelSearch\Tests\Fixtures\Models\SecondaryCustomer;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\CustomerSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\InvoiceSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OwnerKeyInvoiceSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ParcelSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\PartitionedInvoiceSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ProductSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\SecondaryCustomerSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\StagedInvoiceSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Session\RecordingSearchConnectionFactory;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Foundation\Auth\User;
@@ -96,6 +101,19 @@ function prIndexStatements(RecordingSearchConnectionFactory $recorder): array
 }
 
 /**
+ * Every statement a search ran, except the session's own settings lines.
+ *
+ * @return list<array{query: string, bindings: array<mixed>, time: float|null}>
+ */
+function prSearchStatements(RecordingSearchConnectionFactory $recorder): array
+{
+    return array_values(array_filter($recorder->log(), static fn (array $entry): bool => ! str_starts_with($entry['query'], 'SET LOCAL')
+        && ! str_contains($entry['query'], 'current_setting(')
+        && ! str_contains($entry['query'], 'pg_settings')
+        && ! str_starts_with($entry['query'], 'SELECT set_config(')));
+}
+
+/**
  * @return list<string>
  */
 function prSignatures(SearchResults $results): array
@@ -106,6 +124,14 @@ function prSignatures(SearchResults $results): array
 function prOrders(string $phrase): SearchQuery
 {
     return OrderSearch::query($phrase)->within(Order::query());
+}
+
+/**
+ * @return list<string>
+ */
+function prSignaturesOf(SearchResults $results, string $attribute): array
+{
+    return array_map(static fn (SearchResult $result): string => (string) $result->model->{$attribute}, iterator_to_array($results));
 }
 
 /**
@@ -143,7 +169,7 @@ describe('matching', function (): void {
             ->and(iterator_to_array($suffix)[0]->match->mode)->toBe(Mode::Suffix)
             ->and(prSignatures($name))->toBe(['S-1'])
             ->and(iterator_to_array($name)[0]->match->mode)->toBe(Mode::Prefix)
-            ->and(iterator_to_array($name)[0]->match->kind)->toBe('name_word')
+            ->and(iterator_to_array($name)[0]->match->kind)->toBe('customer_name')
             ->and(iterator_to_array($name)[0]->match->value)->toBe('Jan Kowalski')
             ->and(prSignatures($secondWord))->toBe(['S-2']);
     });
@@ -252,7 +278,7 @@ describe('matching', function (): void {
         expect($find('ABC', fn (SearchQuery $q) => $q))->toBe(['ABC-1', 'Q-3', 'ZZZ-OTHER'])
             ->and($find('ABC', fn (SearchQuery $q) => $q->only(['signature'])))->toBe(['ABC-1'])
             ->and($find('ABC', fn (SearchQuery $q) => $q->only(['external_number'])))->toBe(['ABC-1', 'ZZZ-OTHER'])
-            ->and($find('ABC', fn (SearchQuery $q) => $q->only(['customer_name'])))->toBe(['Q-3'])
+            ->and($find('ABC', fn (SearchQuery $q) => $q->only(['customer_name', 'shipping_name'])))->toBe(['Q-3'])
             ->and($find('ABC-1', fn (SearchQuery $q) => $q->using(Mode::Exact)))->toBe(['ABC-1', 'ZZZ-OTHER'])
             ->and($find('ABC-1', fn (SearchQuery $q) => $q->using(Mode::Exact)->only(['external_number'])))->toBe(['ZZZ-OTHER'])
             ->and($find('ABC', fn (SearchQuery $q) => $q->using(Mode::Exact)))->toBe([])
@@ -444,7 +470,7 @@ describe('scope', function (): void {
 
         $match = iterator_to_array(ConfigurableOrderSearch::query('kowal')->within(Order::query())->get())[0]->match;
 
-        expect($match->kind)->toBe('name_word')
+        expect($match->kind)->toBe('customer_name')
             ->and($match->value)->toBeNull();
     });
 
@@ -562,7 +588,7 @@ describe('the one statement', function (): void {
             CustomerSearch::query('302-4562151')->within(Customer::query()),
         );
 
-        expect(prIndexStatements($recorder))->toHaveCount(1)
+        expect(prSearchStatements($recorder))->toHaveCount(1)
             ->and(array_keys($palette))->toBe(['order', 'parcel', 'product', 'invoice', 'customer'])
             ->and(count($palette['order']))->toBe(1)
             ->and(count($palette['parcel']))->toBe(1)
@@ -596,6 +622,41 @@ describe('the one statement', function (): void {
 
         expect(count($palette['order']))->toBe(1)
             ->and(count($palette['product']))->toBe(1);
+    });
+
+    it('refuses a palette whose queries have different viewers', function (): void {
+        $first = new User;
+        $first->forceFill(['id' => 1]);
+        $second = new User;
+        $second->forceFill(['id' => 2]);
+
+        expect(fn () => SearchQuery::palette(prOrders('a')->forUser($first), ProductSearch::query('a')->within(Product::query())->forUser($second)))->toThrow(InvalidArgumentException::class)
+            ->and(fn () => SearchQuery::palette(prOrders('a')->forUser($first), ProductSearch::query('a')->within(Product::query())->forUser(null)))->toThrow(InvalidArgumentException::class);
+    });
+
+    it('runs one statement per connection and merges the answers', function (): void {
+        config(['database.connections.second' => config('database.connections.pgsql')]);
+        $pdo = DB::connection()->getPdo();
+        DB::connection('second')->setPdo($pdo)->setReadPdo($pdo);
+        $registry = new ModelSearchRegistry;
+        $registry->register(OrderSearch::class);
+        $registry->register(SecondaryCustomerSearch::class);
+        app()->instance(ModelSearchRegistry::class, $registry);
+        DB::table(TableNames::forConnection()->state())->delete();
+        Order::create(['signature' => 'ABC-1']);
+        SecondaryCustomer::create(['name' => 'Acme', 'email' => 'ABC-1']);
+        prIndex();
+        $recorder = prRecorder();
+
+        $palette = SearchQuery::palette(
+            OrderSearch::query('ABC-1')->within(Order::query()),
+            SecondaryCustomerSearch::query('ABC-1')->within(SecondaryCustomer::query()),
+        );
+
+        expect(array_keys($palette))->toBe(['order', SecondaryCustomer::class])
+            ->and(count($palette['order']))->toBe(1)
+            ->and(count($palette[SecondaryCustomer::class]))->toBe(1)
+            ->and(prIndexStatements($recorder))->toHaveCount(2);
     });
 
     it('keeps one query per model in a palette', function (): void {
@@ -720,6 +781,50 @@ describe('via', function (): void {
         expect(iterator_to_array(prInvoices('ORD', Order::query())->limit(100)->get()))->toHaveCount(50);
     });
 
+    it('limits the parents per via path, not per branch', function (): void {
+        foreach (range(1, 40) as $i) {
+            $order = Order::create(['signature' => sprintf('ABCD-%02d', $i)]);
+            Invoice::create(['number' => 'FV-A-'.$i, 'order_id' => $order->id]);
+            $order = Order::create(['signature' => sprintf('%02d-ABCD', $i)]);
+            Invoice::create(['number' => 'FV-B-'.$i, 'order_id' => $order->id]);
+        }
+        prIndex();
+
+        expect(iterator_to_array(prInvoices('abcd', Order::query())->limit(100)->get()))->toHaveCount(50);
+    });
+
+    it('narrows the parents by the partition of the parent, not of the child', function (): void {
+        $registry = new ModelSearchRegistry;
+        $registry->register(PartitionedInvoiceSearch::class);
+        $registry->register(OrderSearch::class);
+        app()->instance(ModelSearchRegistry::class, $registry);
+        DB::table(TableNames::forConnection()->state())->delete();
+        $order = Order::create(['signature' => 'ORD-P']);
+        Invoice::create(['number' => 'FV-P', 'order_id' => $order->id, 'tenant_id' => 5]);
+        Invoice::create(['number' => 'FV-Q', 'order_id' => $order->id, 'tenant_id' => 6]);
+        prIndex();
+
+        $results = PartitionedInvoiceSearch::query('ORD-P')->within(Invoice::query(), [Order::class => Order::query()])->partition(5)->get();
+
+        expect(array_map(static fn (SearchResult $r): string => $r->model->number, iterator_to_array($results)))->toBe(['FV-P']);
+    });
+
+    it('reads the stage of a child found through a parent from the child', function (): void {
+        $registry = new ModelSearchRegistry;
+        $registry->register(StagedInvoiceSearch::class);
+        $registry->register(OrderSearch::class);
+        app()->instance(ModelSearchRegistry::class, $registry);
+        DB::table(TableNames::forConnection()->state())->delete();
+        $order = Order::create(['signature' => 'ORD-S']);
+        Invoice::create(['number' => 'FV-S', 'order_id' => $order->id]);
+        prIndex();
+
+        $results = StagedInvoiceSearch::query('ORD-S')->within(Invoice::query(), [Order::class => Order::query()])->get();
+
+        expect(prSignaturesOf($results, 'number'))->toBe(['FV-S'])
+            ->and(iterator_to_array($results)[0]->match->stage)->toBe('attached');
+    });
+
     it('dedupes to the best mode with alternatives', function (): void {
         $order = Order::create(['signature' => 'ORD-1']);
         Invoice::create(['number' => 'ORD-1', 'order_id' => $order->id]);
@@ -831,6 +936,49 @@ describe('partition', function (): void {
     });
 });
 
+describe('names and only()', function (): void {
+    it('refuses only() that names some of the prefix name fields, and accepts all or none', function (): void {
+        Order::create(['signature' => 'S-1', 'customer_name' => 'Jan Kowalski']);
+        prIndex();
+
+        expect(fn () => prOrders('kowal')->only(['customer_name'])->get())->toThrow(UnsupportedQuery::class)
+            ->and(prSignatures(prOrders('kowal')->only(['customer_name', 'shipping_name'])->get()))->toBe(['S-1'])
+            ->and(prSignatures(prOrders('kowal')->only(['signature'])->get()))->toBe([])
+            ->and(prSignatures(prOrders('kowal')->get()))->toBe(['S-1']);
+    });
+
+    it('reports a name word as the first prefix name field with its label', function (): void {
+        prUse([
+            SearchField::name('customer_name')->label(static fn (): string => 'Customer'),
+            SearchField::name('shippingAddress.name')->kind('shipping_name'),
+        ]);
+        Order::create(['signature' => 'S-1', 'customer_name' => 'Jan Kowalski']);
+        prIndex();
+
+        $match = iterator_to_array(ConfigurableOrderSearch::query('kowal')->within(Order::query())->get())[0]->match;
+
+        expect($match->kind)->toBe('customer_name')
+            ->and($match->label)->toBe('Customer');
+    });
+});
+
+describe('plan', function (): void {
+    it('keeps the early stop of a multi-word name phrase: index scan under limit, nested loop, no semi join', function (): void {
+        DB::statement("insert into orders (id, signature, customer_name, state, created_at, updated_at) select gen_random_uuid(), 'ABC-' || g, 'Jan Kowalski' || g, 'shipped', now(), now() from generate_series(1, 20000) g");
+        DB::statement("insert into model_search_keys (subject_type, subject_id, kind, key, value, stage) select 'order', id::text, 'name_word', 'jan', customer_name, 32767 from orders");
+        DB::statement("insert into model_search_keys (subject_type, subject_id, kind, key, value, stage) select 'order', id::text, 'name_word', lower(substr(customer_name, 5)), customer_name, 32767 from orders");
+        DB::statement('analyze model_search_keys');
+        $query = OrderSearch::query('jan kowal')->within(Order::query())->withoutStages();
+        $statement = RoundOne::sql(['order' => ['definition' => app(ModelSearchRegistry::class)->for(Order::class), 'query' => $query, 'host' => $query->scope()]]);
+        DB::statement('SET LOCAL max_parallel_workers_per_gather = 0');
+        $plan = implode("\n", array_map(static fn (object $row): string => (string) current((array) $row), DB::select('EXPLAIN '.$statement['sql'], $statement['bindings'])));
+
+        expect($plan)->toContain('Index Scan using model_search_keys_name_word')
+            ->and($plan)->toContain('Nested Loop')
+            ->and($plan)->not->toContain('Semi Join');
+    });
+});
+
 describe('privacy and failure', function (): void {
     it('never lets the phrase run on the host connection', function (): void {
         Order::create(['signature' => 'SECRETPHRASE', 'customer_name' => 'Secretphrase Person']);
@@ -891,25 +1039,78 @@ describe('privacy and failure', function (): void {
 });
 
 describe('readiness', function (): void {
-    it('falls back to the database driver until the index is ready', function (): void {
+    function prUnready(string $type = 'order'): void
+    {
+        DB::table(TableNames::forConnection()->state())->where('subject_type', $type)->update(['ready_at' => null]);
+        (new IndexState)->forget($type);
+    }
+
+    it('falls back to the database driver until the index is ready, and says the index is building', function (): void {
         Order::create(['signature' => 'ABC-1', 'customer_name' => 'Kowalski']);
         $recorder = prRecorder();
-        DB::table(TableNames::forConnection()->state())->update(['ready_at' => null]);
+        prUnready();
 
         $results = prOrders('ABC-1')->get();
         $names = prOrders('kowal')->get();
 
         expect(prSignatures($results))->toBe(['ABC-1'])
             ->and(prSignatures($names))->toBe(['ABC-1'])
+            ->and($results->indexBuilding)->toBeTrue()
             ->and(prIndexStatements($recorder))->toBe([]);
     });
 
+    it('does not say the index is building when it is ready', function (): void {
+        Order::create(['signature' => 'ABC-1']);
+        prIndex();
+
+        expect(prOrders('ABC-1')->get()->indexBuilding)->toBeFalse();
+    });
+
+    it('searches only the source columns of a type without a fallback, and never throws', function (): void {
+        ConfigurableOrderSearch::$fallback = false;
+        prUse([
+            SearchField::key('signature')->exactOnSource(),
+            SearchField::key('external_number'),
+            SearchField::name('customer_name'),
+        ]);
+        Order::create(['signature' => 'ABC-1', 'external_number' => 'ABC-1', 'customer_name' => 'Abc Person']);
+        Order::create(['signature' => 'S-2', 'external_number' => 'EXT-9', 'customer_name' => 'Kowalski']);
+        $recorder = prRecorder();
+        $find = static fn (string $phrase): SearchResults => ConfigurableOrderSearch::query($phrase)->within(Order::query())->get();
+
+        $exact = $find('ABC-1');
+        $prefix = $find('ABC');
+        $name = $find('kowal');
+        $other = $find('EXT-9');
+
+        expect(prSignatures($exact))->toBe(['ABC-1'])
+            ->and(iterator_to_array($exact)[0]->match->kind)->toBe('signature')
+            ->and($exact->indexBuilding)->toBeTrue()
+            ->and(prSignatures($prefix))->toBe([])
+            ->and(prSignatures($name))->toBe([])
+            ->and(prSignatures($other))->toBe([])
+            ->and($other->indexBuilding)->toBeTrue()
+            ->and(prIndexStatements($recorder))->toBe([]);
+    });
+
+    it('runs nothing for a type without a fallback and without a source column', function (): void {
+        ConfigurableOrderSearch::$fallback = false;
+        prUse([SearchField::key('signature'), SearchField::name('customer_name')]);
+        Order::create(['signature' => 'ABC-1']);
+        $recorder = prRecorder();
+
+        $results = ConfigurableOrderSearch::query('ABC-1')->within(Order::query())->get();
+
+        expect(prSignatures($results))->toBe([])
+            ->and($results->indexBuilding)->toBeTrue()
+            ->and($recorder->log())->toBe([]);
+    });
+
     it('serves the ready types from the index and the others from the tables in one palette', function (): void {
-        $order = Order::create(['signature' => '302-4562151']);
+        Order::create(['signature' => '302-4562151']);
         Product::create(['sku' => '302-4562151']);
         prIndex();
-        DB::table(TableNames::forConnection()->state())->where('subject_type', 'order')->update(['ready_at' => null]);
-        (new IndexState)->forget('order');
+        prUnready();
         $recorder = prRecorder();
 
         $palette = SearchQuery::palette(
@@ -919,7 +1120,8 @@ describe('readiness', function (): void {
 
         expect(count($palette['order']))->toBe(1)
             ->and(count($palette['product']))->toBe(1)
-            ->and($order->signature)->toBe('302-4562151')
+            ->and($palette['order']->indexBuilding)->toBeTrue()
+            ->and($palette['product']->indexBuilding)->toBeTrue()
             ->and(prIndexStatements($recorder))->toHaveCount(1);
     });
 });

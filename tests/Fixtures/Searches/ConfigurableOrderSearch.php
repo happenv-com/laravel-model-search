@@ -37,6 +37,8 @@ final class ConfigurableOrderSearch extends ModelSearch
 
     public static ?string $partition = null;
 
+    public static bool $fallback = true;
+
     public static function reset(): void
     {
         self::$fields = null;
@@ -47,6 +49,7 @@ final class ConfigurableOrderSearch extends ModelSearch
         self::$sortAt = null;
         self::$definitionVersion = 1;
         self::$partition = null;
+        self::$fallback = true;
     }
 
     public function fields(): array
@@ -80,6 +83,11 @@ final class ConfigurableOrderSearch extends ModelSearch
     public function partition(): ?string
     {
         return self::$partition;
+    }
+
+    public function fallback(): bool
+    {
+        return self::$fallback;
     }
 
     public function version(): int

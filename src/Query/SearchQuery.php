@@ -297,6 +297,12 @@ final class SearchQuery
             $scopes[$query->modelClass] = $query->host;
         }
 
+        $viewers = array_unique(array_map(static fn (self $query): string => ($viewer = $query->viewer()) instanceof Authenticatable ? 'user:'.$viewer->getAuthIdentifier() : 'none', $queries));
+
+        if (count($viewers) > 1) {
+            throw new InvalidArgumentException('A palette has one viewer; its queries name different ones.');
+        }
+
         foreach ($queries as $query) {
             $query->admit();
         }
@@ -510,6 +516,16 @@ final class SearchQuery
         $this->guard();
 
         return $this->host ?? HostQuery::from((new ($this->modelClass))->newQuery());
+    }
+
+    /**
+     * The value given to {@see self::partition()}, whether or not this model is partitioned.
+     *
+     * @internal
+     */
+    public function partitionValue(): string|int|null
+    {
+        return $this->partition;
     }
 
     /**

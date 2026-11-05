@@ -6,12 +6,15 @@ namespace Happenv\ModelSearch\Postgres\Query;
 
 use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
+use Happenv\ModelSearch\Definition\CompiledField;
+use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Drivers\DatabaseDriver;
 use Happenv\ModelSearch\Drivers\Driver;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Happenv\ModelSearch\Postgres\Session\SearchSession;
 use Happenv\ModelSearch\Query\ChargeOnce;
+use Happenv\ModelSearch\Query\NameFieldSelection;
 use Happenv\ModelSearch\Query\SearchQuery;
 use Happenv\ModelSearch\Query\SearchResults;
 use Illuminate\Database\Connection;
@@ -27,8 +30,9 @@ use Illuminate\Support\Collection;
  * then loaded by the host's own query by primary key ({@see Hydrator}).
  *
  * A type whose index has never been built completely ({@see IndexState::isReady()}) is served by the
- * {@see DatabaseDriver} straight from its source tables, whatever its `fallback()` says: until then
- * there is no complete index to read, and the doctor says so. A palette that mixes ready and
+ * {@see DatabaseDriver} straight from its source tables when its definition allows a `fallback()`;
+ * otherwise only its `exactOnSource` fields are searched meanwhile, and the search never throws. In
+ * both cases every result of the call says `indexBuilding`. A palette that mixes ready and
  * unready types reads the ready ones in its one statement and the others one by one, and returns
  * them together, each type ranked on its own.
  *
@@ -59,10 +63,12 @@ final readonly class PostgresDriver implements Driver
         $queries = array_map(static fn (SearchQuery $query): SearchQuery => $query->sharingCharge($charge), $queries);
         $results = [];
         $ready = [];
+        $building = false;
 
         foreach ($queries as $query) {
             $definition = $query->definition();
             $results[$definition->morphAlias] = null;
+            NameFieldSelection::assertWhole($definition, $query->onlyKinds());
 
             if ($this->isReady($definition)) {
                 $ready[Sql::connectionName(new ($definition->modelClass))][] = $query;
@@ -70,14 +76,39 @@ final readonly class PostgresDriver implements Driver
                 continue;
             }
 
-            $results[$definition->morphAlias] = new DatabaseDriver($definition)->get($query);
+            $building = true;
+            $results[$definition->morphAlias] = $definition->fallback
+                ? new DatabaseDriver($definition)->get($query)
+                : $this->sourceOnly($query, $definition);
         }
 
         foreach ($ready as $connection => $group) {
             $results = [...$results, ...$this->round($connection, $group)];
         }
 
-        return array_filter($results, static fn (?SearchResults $outcome): bool => $outcome instanceof SearchResults);
+        $results = array_filter($results, static fn (?SearchResults $outcome): bool => $outcome instanceof SearchResults);
+
+        return $building ? array_map(static fn (SearchResults $outcome): SearchResults => $outcome->whileIndexBuilding(), $results) : $results;
+    }
+
+    /**
+     * What a type without a fallback can answer while its index is being built: the `exactOnSource`
+     * fields, which read the source table anyway (P§10.5), by their exact value, and nothing else.
+     */
+    private function sourceOnly(SearchQuery $query, CompiledDefinition $definition): SearchResults
+    {
+        $modes = $query->onlyModes();
+        $named = $query->onlyKinds();
+        $kinds = array_values(array_map(
+            static fn (CompiledField $field): string => $field->kind,
+            array_filter($definition->fields, static fn (CompiledField $field): bool => $field->exactOnSource && ($named === [] || in_array($field->kind, $named, true))),
+        ));
+
+        if ($kinds === [] || ($modes !== [] && ! in_array(Mode::Exact, $modes, true))) {
+            return new SearchResults;
+        }
+
+        return new DatabaseDriver($definition)->get($query->only($kinds)->using(Mode::Exact));
     }
 
     #[\Override]

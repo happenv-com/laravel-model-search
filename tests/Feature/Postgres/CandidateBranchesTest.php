@@ -121,7 +121,8 @@ it('reads the longest word and asks for the others in the same record', function
     $words = array_values(array_filter($branches, static fn (Fragment $branch): bool => str_contains($branch->sql, IndexPlan::NAME_WORDS)));
 
     expect($words)->toHaveCount(1)
-        ->and($words[0]->sql)->toContain('EXISTS (SELECT 1')
+        ->and($words[0]->sql)->toContain('JOIN LATERAL (SELECT 1')
+        ->and($words[0]->sql)->not->toContain('EXISTS')
         ->and($words[0]->bindings)->toContain('kowalski%')
         ->and($words[0]->bindings)->toContain('jan%');
 });
@@ -141,7 +142,7 @@ it('keeps the via branch closed without a scope for the parent, and opens it wit
 
     expect($closed)->not->toContain('JOIN LATERAL')
         ->and($text)->toContain('JOIN LATERAL')
-        ->and($text)->toContain(' LIMIT '.DatabaseDriver::VIA_PARENT_LIMIT.')')
+        ->and($text)->toContain(' LIMIT '.(DatabaseDriver::VIA_PARENT_LIMIT + 1).')')
         ->and($text)->toContain(IndexPlan::GENERIC_KEYS);
 });
 
@@ -149,7 +150,7 @@ it('filters the parents by the scope of the parent before the limit of parents',
     $open = cbBranches(Invoice::class, InvoiceSearch::query('ORD-1')->within(Invoice::query(), [Order::class => Order::query()]));
     $via = array_values(array_filter($open, static fn (Fragment $branch): bool => str_contains($branch->sql, 'JOIN LATERAL')))[0]->sql;
 
-    expect(strpos($via, 'JOIN LATERAL'))->toBeLessThan(strpos($via, ' LIMIT '.DatabaseDriver::VIA_PARENT_LIMIT.')'));
+    expect(strpos($via, 'JOIN LATERAL'))->toBeLessThan(strpos($via, ' LIMIT '.(DatabaseDriver::VIA_PARENT_LIMIT + 1).')'));
 });
 
 it('joins the source column of a field that reads it', function (): void {

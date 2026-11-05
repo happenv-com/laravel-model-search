@@ -23,6 +23,7 @@ use Happenv\ModelSearch\Normalization\PhraseShape;
 use Happenv\ModelSearch\Normalization\QueryVariants;
 use Happenv\ModelSearch\Postgres\Session\SearchSession;
 use Happenv\ModelSearch\Query\HostQuery;
+use Happenv\ModelSearch\Query\NameFieldSelection;
 use Happenv\ModelSearch\Query\RevealPolicy;
 use Happenv\ModelSearch\Query\SearchMatch;
 use Happenv\ModelSearch\Query\SearchQuery;
@@ -78,6 +79,7 @@ SQL;
     #[\Override]
     public function get(SearchQuery $query): SearchResults
     {
+        NameFieldSelection::assertWhole($this->definition, $query->onlyKinds());
         $hits = $this->hits(Probe::of($query), forTable: false, fuzzy: false, query: $query);
 
         if (! $hits instanceof Fragment) {
@@ -134,6 +136,7 @@ SQL;
     #[\Override]
     public function apply(SearchQuery $query, Builder $tableQuery): Builder
     {
+        NameFieldSelection::assertWhole($this->definition, $query->onlyKinds());
         $hits = $this->hits(Probe::of($query), forTable: true, fuzzy: false, query: $query);
 
         $ids = [];
@@ -154,6 +157,7 @@ SQL;
     #[\Override]
     public function candidates(SearchQuery $query): Collection
     {
+        NameFieldSelection::assertWhole($this->definition, $query->onlyKinds());
         $hits = $this->hits(Probe::of($query), forTable: false, fuzzy: false, query: $query);
 
         if (! $hits instanceof Fragment) {

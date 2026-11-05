@@ -235,13 +235,13 @@ final class CandidateBranches
         $where = [sprintf('k.subject_type = ? AND k.%s', IndexPlan::GENERIC_KEYS)];
         $bindings = [$this->definition->morphAlias];
 
-        $this->narrow($where, $bindings, $stageVariant, $kinds);
+        $this->narrow($where, $bindings, $stageVariant, $kinds, $this->query->partitionFilter());
         $where[] = $condition;
         $bindings[] = $binding;
 
         return new Fragment(
             sprintf(
-                '(SELECT %d AS ti, k.subject_id, %d AS level, k.kind, k.value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, (k.stage < %d) AS s0, %d AS bk, false AS src, %d AS br FROM %s k WHERE %s%s LIMIT %d)',
+                '(SELECT %d AS ti, k.subject_id, %d AS level, k.kind, k.value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, (k.stage < %d) AS s0, %d AS bk, false AS src, %d AS br, false AS ptr FROM %s k WHERE %s%s LIMIT %d)',
                 $this->typeIndex,
                 $mode->rank(),
                 CompiledDefinition::ALL_STAGE,
@@ -265,35 +265,41 @@ final class CandidateBranches
      */
     private function wordBranch(string $main, array $others, int $stageVariant): Fragment
     {
-        $bindings = [$main, $this->definition->morphAlias];
+        $select = [$main];
+        $laterals = [];
+        $lateralBindings = [];
+        $bindings = [$this->definition->morphAlias];
         $where = [sprintf('k.subject_type = ? AND k.%s', IndexPlan::NAME_WORDS)];
 
-        $this->narrow($where, $bindings, $stageVariant, null);
+        // Each other word is a one-row lookup per candidate, so the scan of the main word still ends at the limit.
+        foreach ($others as $position => $other) {
+            $laterals[] = sprintf(
+                " JOIN LATERAL (SELECT 1 FROM %s w WHERE w.subject_type = k.subject_type AND w.subject_id = k.subject_id AND w.%s AND w.key LIKE ? ESCAPE '\\' LIMIT 1) o%d ON true",
+                $this->keys,
+                IndexPlan::NAME_WORDS,
+                $position,
+            );
+            $lateralBindings[] = LikeEscaper::escape($other).'%';
+        }
+
+        $this->narrow($where, $bindings, $stageVariant, null, $this->query->partitionFilter());
         $where[] = "k.key LIKE ? ESCAPE '\\'";
         $bindings[] = LikeEscaper::escape($main).'%';
 
-        foreach ($others as $other) {
-            $where[] = sprintf(
-                "EXISTS (SELECT 1 FROM %s w WHERE w.subject_type = k.subject_type AND w.subject_id = k.subject_id AND w.%s AND w.key LIKE ? ESCAPE '\\')",
-                $this->keys,
-                IndexPlan::NAME_WORDS,
-            );
-            $bindings[] = LikeEscaper::escape($other).'%';
-        }
-
         return new Fragment(
             sprintf(
-                '(SELECT %d AS ti, k.subject_id, %d AS level, k.kind, k.value, CAST(NULL AS text) AS via, CAST((k.key = ?) AS integer) AS sim, (k.stage < %d) AS s0, %d AS bk, false AS src, %d AS br FROM %s k WHERE %s ORDER BY k.key USING ~<~ LIMIT %d)',
+                '(SELECT %d AS ti, k.subject_id, %d AS level, k.kind, k.value, CAST(NULL AS text) AS via, CAST((k.key = ?) AS integer) AS sim, (k.stage < %d) AS s0, %d AS bk, false AS src, %d AS br, false AS ptr FROM %s k%s WHERE %s ORDER BY k.key USING ~<~ LIMIT %d)',
                 $this->typeIndex,
                 Mode::Prefix->rank(),
                 CompiledDefinition::ALL_STAGE,
                 $stageVariant,
                 $this->nextBranch(),
                 $this->keys,
+                implode('', $laterals),
                 implode(' AND ', $where),
                 $this->pool + 1,
             ),
-            $bindings,
+            [...$select, ...$lateralBindings, ...$bindings],
         );
     }
 
@@ -321,7 +327,7 @@ final class CandidateBranches
 
         return new Fragment(
             sprintf(
-                '(SELECT %1$d AS ti, s.%2$s::text AS subject_id, 0 AS level, CAST(? AS text) AS kind, s.source_value::text AS value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, %3$s AS s0, %4$d AS bk, true AS src, %5$d AS br FROM (%6$s) AS s LIMIT %7$d)',
+                '(SELECT %1$d AS ti, s.%2$s::text AS subject_id, 0 AS level, CAST(? AS text) AS kind, s.source_value::text AS value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, %3$s AS s0, %4$d AS bk, true AS src, %5$d AS br, false AS ptr FROM (%6$s) AS s LIMIT %7$d)',
                 $this->typeIndex,
                 Sql::ident(HostQuery::KEY_ALIAS),
                 $inStage->sql,
@@ -386,13 +392,21 @@ final class CandidateBranches
         $viaOwnerKey = $ownerKey !== $parent->getKeyName();
         $childKey = $viaOwnerKey ? 'pt.'.Sql::ident($ownerKey) : sprintf('pc.subject_id::%s', $parentKeyType);
         $union = Fragment::join($candidates, ' UNION ALL ');
+        $union = new Fragment(
+            sprintf(
+                'SELECT q.subject_id, q.level, q.kind, q.value, q.over FROM (SELECT d.*, row_number() OVER (ORDER BY d.level, d.subject_id) AS rn, count(*) OVER () > %1$d AS over FROM (SELECT DISTINCT ON (p.subject_id) p.subject_id, p.level, p.kind, p.value FROM (%2$s) AS p ORDER BY p.subject_id, p.level, p.kind) AS d) AS q WHERE q.rn <= %1$d',
+                DatabaseDriver::VIA_PARENT_LIMIT,
+                $union->sql,
+            ),
+            $union->bindings,
+        );
         $entries = TableNames::forConnection(Sql::connectionName($this->model))->quoted(TableNames::forConnection(Sql::connectionName($this->model))->entries());
         $stageBindings = $this->staged ? [$this->definition->morphAlias] : [];
         $partition = $this->query->partitionFilter();
 
         return new Fragment(
             sprintf(
-                '(SELECT %1$d AS ti, ch.%2$s::text AS subject_id, (%3$d + pc.level) AS level, CAST(? AS text) AS kind, CASE WHEN pc.kind = ANY(?::text[]) THEN NULL ELSE pc.value END AS value, CAST(? AS text) AS via, CAST(0 AS real) AS sim, %4$s AS s0, %5$d AS bk, false AS src, %6$d AS br FROM (%7$s) AS pc%8$s JOIN %9$s AS ch ON ch.%10$s = %11$s%14$s%12$s LIMIT %13$d)',
+                '(SELECT %1$d AS ti, ch.%2$s::text AS subject_id, (%3$d + pc.level) AS level, CAST(? AS text) AS kind, CASE WHEN pc.kind = ANY(?::text[]) THEN NULL ELSE pc.value END AS value, CAST(? AS text) AS via, CAST(0 AS real) AS sim, %4$s AS s0, %5$d AS bk, false AS src, %6$d AS br, pc.over AS ptr FROM (%7$s) AS pc%8$s JOIN %9$s AS ch ON ch.%10$s = %11$s%14$s%12$s LIMIT %13$d)',
                 $this->typeIndex,
                 Sql::ident($this->model->getKeyName()),
                 Hit::VIA_OFFSET,
@@ -425,7 +439,7 @@ final class CandidateBranches
         $where = [sprintf('k.subject_type = ? AND k.%s', IndexPlan::GENERIC_KEYS)];
         $bindings = [$parentDefinition->morphAlias];
 
-        $this->narrow($where, $bindings, self::PLAIN, $item['kinds']);
+        $this->narrow($where, $bindings, self::PLAIN, $item['kinds'], $this->parentPartition($parentDefinition));
         $where[] = $condition;
         $bindings[] = $binding;
 
@@ -439,10 +453,24 @@ final class CandidateBranches
                 $parentDefinition->resolvedKeySqlType(),
                 implode(' AND ', $where),
                 $order,
-                DatabaseDriver::VIA_PARENT_LIMIT,
+                DatabaseDriver::VIA_PARENT_LIMIT + 1,
             ),
             [...$host['bindings'], ...$bindings],
         );
+    }
+
+    /**
+     * The partition the parent's keys are narrowed by: the parent definition's own column (none when
+     * the parent is not partitioned) with the value the query was given.
+     *
+     * @return array{column: string, value: string|int}|null
+     */
+    private function parentPartition(CompiledDefinition $parentDefinition): ?array
+    {
+        $column = $parentDefinition->partition ?? config('model-search.partition_column');
+        $value = $this->query->partitionValue();
+
+        return is_string($column) && $column !== '' && $value !== null ? ['column' => $column, 'value' => $value] : null;
     }
 
     /**
@@ -452,11 +480,10 @@ final class CandidateBranches
      * @param  list<string>  $where
      * @param  list<mixed>  $bindings
      * @param  list<string>|null  $kinds
+     * @param  array{column: string, value: string|int}|null  $partition
      */
-    private function narrow(array &$where, array &$bindings, int $stageVariant, ?array $kinds): void
+    private function narrow(array &$where, array &$bindings, int $stageVariant, ?array $kinds, ?array $partition): void
     {
-        $partition = $this->query->partitionFilter();
-
         if ($partition !== null) {
             $where[] = 'k."partition" = ?';
             $bindings[] = (string) $partition['value'];

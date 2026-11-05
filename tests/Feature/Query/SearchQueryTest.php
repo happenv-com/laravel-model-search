@@ -11,6 +11,7 @@ use Happenv\ModelSearch\Exceptions\SearchScopeMissing;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Exceptions\SearchTooBroad;
 use Happenv\ModelSearch\Exceptions\UnsupportedHostQuery;
+use Happenv\ModelSearch\Exceptions\UnsupportedQuery;
 use Happenv\ModelSearch\Query\SearchQuery;
 use Happenv\ModelSearch\Query\SearchResult;
 use Happenv\ModelSearch\Query\SearchResults;
@@ -244,7 +245,8 @@ describe('matching', function (): void {
         expect($find('ABC', fn (SearchQuery $q) => $q))->toBe(['ABC-1', 'Q-3', 'ZZZ-OTHER'])
             ->and($find('ABC', fn (SearchQuery $q) => $q->only(['signature'])))->toBe(['ABC-1'])
             ->and($find('ABC', fn (SearchQuery $q) => $q->only(['external_number'])))->toBe(['ABC-1', 'ZZZ-OTHER'])
-            ->and($find('ABC', fn (SearchQuery $q) => $q->only(['customer_name'])))->toBe(['Q-3'])
+            ->and($find('ABC', fn (SearchQuery $q) => $q->only(['customer_name', 'shipping_name'])))->toBe(['Q-3'])
+            ->and(fn () => orderSearch('ABC')->only(['customer_name'])->get())->toThrow(UnsupportedQuery::class)
             ->and($find('ABC-1', fn (SearchQuery $q) => $q->using(Mode::Exact)))->toBe(['ABC-1', 'ZZZ-OTHER'])
             ->and($find('ABC-1', fn (SearchQuery $q) => $q->using(Mode::Exact)->only(['external_number'])))->toBe(['ZZZ-OTHER'])
             ->and($find('ABC', fn (SearchQuery $q) => $q->using(Mode::Exact)))->toBe([])

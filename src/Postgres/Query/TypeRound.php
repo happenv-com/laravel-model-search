@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Postgres\Query;
 
+use Happenv\ModelSearch\Drivers\DatabaseDriver;
 use Happenv\ModelSearch\Query\SearchResults;
 
 /**
@@ -21,6 +22,7 @@ final readonly class TypeRound
      * @param  int  $nonExactInStageZero  Authorized records of the first stage whose best hit is not an exact one.
      * @param  bool  $stageZeroFull  A branch of the first stage returned `pool + 1` rows.
      * @param  bool  $anyFull  A branch that counts for the first stage, or no stage at all, returned `pool + 1` rows.
+     * @param  bool  $viaPoolFull  A `via` path found more than {@see DatabaseDriver::VIA_PARENT_LIMIT} parents in the parent's scope; the surplus gave no children.
      * @param  bool  $allStagesFull  A branch of all stages (of a type with stages, not exact) returned `pool + 1` rows.
      */
     public function __construct(
@@ -30,12 +32,13 @@ final readonly class TypeRound
         public bool $stageZeroFull,
         public bool $anyFull,
         public bool $allStagesFull,
+        public bool $viaPoolFull,
         public int $limit,
     ) {}
 
     public static function empty(int $limit): self
     {
-        return new self([], 0, 0, false, false, false, $limit);
+        return new self([], 0, 0, false, false, false, false, $limit);
     }
 
     /**
