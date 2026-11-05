@@ -14,6 +14,7 @@ use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Happenv\ModelSearch\Postgres\Indexing\SearchIndexer;
 use Happenv\ModelSearch\Postgres\Query\PostgresDriver;
 use Happenv\ModelSearch\Postgres\Query\RoundOne;
+use Happenv\ModelSearch\Postgres\Query\TypeRound;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Postgres\Session\SearchConnectionFactory;
 use Happenv\ModelSearch\Query\SearchQuery;
@@ -791,6 +792,35 @@ describe('via', function (): void {
         prIndex();
 
         expect(iterator_to_array(prInvoices('abcd', Order::query())->limit(100)->get()))->toHaveCount(50);
+    });
+
+    it('keeps the via pool flag when the kept parents have no children', function (): void {
+        $invoiceFor = static function (array $numbers): void {
+            foreach ($numbers as $n) {
+                Invoice::create(['number' => 'FV-'.$n, 'order_id' => sprintf('00000000-0000-0000-0000-%012d', $n)]);
+            }
+        };
+        foreach (range(1, 60) as $n) {
+            Order::create(['id' => sprintf('00000000-0000-0000-0000-%012d', $n), 'signature' => sprintf('ORD-%02d', $n)]);
+        }
+        $round = static function (): TypeRound {
+            $query = prInvoices('ORD', Order::query())->limit(100);
+            $statement = RoundOne::sql(['invoice' => ['definition' => $query->definition(), 'query' => $query, 'host' => $query->scope()]]);
+
+            return RoundOne::read(DB::select($statement['sql'], $statement['bindings']), ['invoice'], ['invoice' => 100])['invoice'];
+        };
+
+        $invoiceFor(range(55, 60));
+        prIndex();
+        $none = $round();
+        $invoiceFor(range(1, 4));
+        prIndex();
+        $some = $round();
+
+        expect($none->rows)->toBe([])
+            ->and($none->viaPoolFull)->toBeTrue()
+            ->and(count($some->rows))->toBe(4)
+            ->and($some->viaPoolFull)->toBeTrue();
     });
 
     it('narrows the parents by the partition of the parent, not of the child', function (): void {

@@ -129,6 +129,13 @@ it('reports lag, failures, unknown nodes and a type that is not ready', function
     expect($codes)->toBe(['failures', 'lag', 'type-not-ready', 'unknown-nodes']);
 });
 
+it('says what serves a type that is not ready: the fallback, or only its source fields', function (): void {
+    DB::table(dcTable('state'))->whereIn('subject_type', ['customer'])->update(['ready_at' => null]);
+    $with = collect(app(Doctor::class)->inspect())->firstWhere('code', 'type-not-ready');
+
+    expect($with->message)->toContain('served from the source tables');
+});
+
 it('reports a type that is not installed or installed for another definition', function (): void {
     DB::table(dcTable('state'))->where('subject_type', 'invoice')->delete();
     DB::table(dcTable('state'))->where('subject_type', 'customer')->update(['definition_fingerprint' => 'other']);

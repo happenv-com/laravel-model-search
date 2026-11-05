@@ -40,6 +40,7 @@ return new class extends Migration
             $table->bigInteger('tenant_id')->nullable();
             $table->timestampTz('purchased_at', 6)->nullable();
             $table->timestampsTz(6);
+            $table->index('signature');
         });
 
         Schema::create('market_orders', function (Blueprint $table): void {

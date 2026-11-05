@@ -394,7 +394,7 @@ final class CandidateBranches
         $union = Fragment::join($candidates, ' UNION ALL ');
         $union = new Fragment(
             sprintf(
-                'SELECT q.subject_id, q.level, q.kind, q.value, q.over FROM (SELECT d.*, row_number() OVER (ORDER BY d.level, d.subject_id) AS rn, count(*) OVER () > %1$d AS over FROM (SELECT DISTINCT ON (p.subject_id) p.subject_id, p.level, p.kind, p.value FROM (%2$s) AS p ORDER BY p.subject_id, p.level, p.kind) AS d) AS q WHERE q.rn <= %1$d',
+                'SELECT q.subject_id, q.level, q.kind, q.value, q.over, q.rn FROM (SELECT d.*, row_number() OVER (ORDER BY d.level, d.subject_id) AS rn, count(*) OVER () > %1$d AS over FROM (SELECT DISTINCT ON (p.subject_id) p.subject_id, p.level, p.kind, p.value FROM (%2$s) AS p ORDER BY p.subject_id, p.level, p.kind) AS d) AS q WHERE q.rn <= %1$d',
                 DatabaseDriver::VIA_PARENT_LIMIT,
                 $union->sql,
             ),
@@ -406,7 +406,7 @@ final class CandidateBranches
 
         return new Fragment(
             sprintf(
-                '(SELECT %1$d AS ti, ch.%2$s::text AS subject_id, (%3$d + pc.level) AS level, CAST(? AS text) AS kind, CASE WHEN pc.kind = ANY(?::text[]) THEN NULL ELSE pc.value END AS value, CAST(? AS text) AS via, CAST(0 AS real) AS sim, %4$s AS s0, %5$d AS bk, false AS src, %6$d AS br, pc.over AS ptr FROM (%7$s) AS pc%8$s JOIN %9$s AS ch ON ch.%10$s = %11$s%14$s%12$s LIMIT %13$d)',
+                '(SELECT %1$d AS ti, ch.%2$s::text AS subject_id, (%3$d + pc.level) AS level, CAST(? AS text) AS kind, CASE WHEN pc.kind = ANY(?::text[]) THEN NULL ELSE pc.value END AS value, CAST(? AS text) AS via, CAST(0 AS real) AS sim, %4$s AS s0, %5$d AS bk, false AS src, %6$d AS br, pc.over AS ptr FROM (%7$s) AS pc%8$s LEFT JOIN %9$s AS ch ON ch.%10$s = %11$s%14$s%12$s WHERE ch.%2$s IS NOT NULL OR (pc.over AND pc.rn = 1) LIMIT %13$d)',
                 $this->typeIndex,
                 Sql::ident($this->model->getKeyName()),
                 Hit::VIA_OFFSET,

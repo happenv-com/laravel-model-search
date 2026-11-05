@@ -115,7 +115,12 @@ final readonly class Doctor
             $row = $this->state->find($definition->morphAlias);
 
             if ($row !== null && $row['ready_at'] === null) {
-                $findings[] = new Finding('type-not-ready', sprintf('%s has never been indexed completely, so searches of it use the fallback.', $definition->morphAlias), $definition->morphAlias);
+                $findings[] = new Finding('type-not-ready', sprintf(
+                    $definition->fallback
+                        ? '%s has never been indexed completely, so searches of it are served from the source tables.'
+                        : '%s has never been indexed completely and has no fallback, so only its exactOnSource fields are searched.',
+                    $definition->morphAlias,
+                ), $definition->morphAlias);
             }
         }
 

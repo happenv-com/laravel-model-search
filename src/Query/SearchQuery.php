@@ -297,7 +297,7 @@ final class SearchQuery
             $scopes[$query->modelClass] = $query->host;
         }
 
-        $viewers = array_unique(array_map(static fn (self $query): string => ($viewer = $query->viewer()) instanceof Authenticatable ? 'user:'.$viewer->getAuthIdentifier() : 'none', $queries));
+        $viewers = array_unique(array_map(static fn (self $query): string => ($viewer = $query->viewer()) instanceof Authenticatable ? $viewer::class.':'.$viewer->getAuthIdentifier() : 'none', $queries));
 
         if (count($viewers) > 1) {
             throw new InvalidArgumentException('A palette has one viewer; its queries name different ones.');
