@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Postgres\Indexing;
 
+use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Illuminate\Database\Connection;
 
@@ -32,7 +33,7 @@ final readonly class DiffWriter
             return;
         }
 
-        $idArray = $this->array($rootIds);
+        $idArray = Sql::arrayLiteral($rootIds);
         $entries = $this->names->quoted($this->names->entries());
         $keys = $this->names->quoted($this->names->keys());
 
@@ -119,14 +120,14 @@ final readonly class DiffWriter
         $keysDeleted = 0;
 
         if ($goneIds !== []) {
-            $keysDeleted += $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $keys), [$subjectType, $this->array($goneIds)]);
-            $goneEntries = $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $entries), [$subjectType, $this->array($goneIds)]);
+            $keysDeleted += $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $keys), [$subjectType, Sql::arrayLiteral($goneIds)]);
+            $goneEntries = $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $entries), [$subjectType, Sql::arrayLiteral($goneIds)]);
         }
 
         foreach (array_chunk($keyDeletes, self::CHUNK) as $chunk) {
             $keysDeleted += $db->affectingStatement(
                 sprintf('DELETE FROM %s AS k USING unnest(?::text[], ?::text[], ?::text[]) AS u("subject_id", "kind", "key") WHERE k."subject_type" = ? AND k."subject_id" = u."subject_id" AND k."kind" = u."kind" AND k."key" = u."key"', $keys),
-                [$this->array(array_column($chunk, 0)), $this->array(array_column($chunk, 1)), $this->array(array_column($chunk, 2)), $subjectType],
+                [Sql::arrayLiteral(array_column($chunk, 0)), Sql::arrayLiteral(array_column($chunk, 1)), Sql::arrayLiteral(array_column($chunk, 2)), $subjectType],
             );
         }
 
@@ -138,11 +139,11 @@ final readonly class DiffWriter
                 ),
                 [
                     $subjectType,
-                    $this->array(array_map(static fn (RootContribution $row): string => $row->rootId, $chunk)),
-                    $this->array(array_map(static fn (RootContribution $row): ?string => $row->partition, $chunk)),
-                    $this->array(array_map(static fn (RootContribution $row): int => $row->stage, $chunk)),
-                    $this->array(array_map(static fn (RootContribution $row): string => $row->names, $chunk)),
-                    $this->array(array_map(static fn (RootContribution $row): ?string => $row->sortAt, $chunk)),
+                    Sql::arrayLiteral(array_map(static fn (RootContribution $row): string => $row->rootId, $chunk)),
+                    Sql::arrayLiteral(array_map(static fn (RootContribution $row): ?string => $row->partition, $chunk)),
+                    Sql::arrayLiteral(array_map(static fn (RootContribution $row): int => $row->stage, $chunk)),
+                    Sql::arrayLiteral(array_map(static fn (RootContribution $row): string => $row->names, $chunk)),
+                    Sql::arrayLiteral(array_map(static fn (RootContribution $row): ?string => $row->sortAt, $chunk)),
                 ],
             );
         }
@@ -155,12 +156,12 @@ final readonly class DiffWriter
                 ),
                 [
                     $subjectType,
-                    $this->array(array_column($chunk, 0)),
-                    $this->array(array_column($chunk, 1)),
-                    $this->array(array_column($chunk, 2)),
-                    $this->array(array_column($chunk, 3)),
-                    $this->array(array_column($chunk, 4)),
-                    $this->array(array_column($chunk, 5)),
+                    Sql::arrayLiteral(array_column($chunk, 0)),
+                    Sql::arrayLiteral(array_column($chunk, 1)),
+                    Sql::arrayLiteral(array_column($chunk, 2)),
+                    Sql::arrayLiteral(array_column($chunk, 3)),
+                    Sql::arrayLiteral(array_column($chunk, 4)),
+                    Sql::arrayLiteral(array_column($chunk, 5)),
                 ],
             );
         }
@@ -174,18 +175,5 @@ final readonly class DiffWriter
         if ($goneEntries + $keysDeleted + count($entryRows) + $keyWrites + $stageRewrites > 0) {
             $stats->touch($subjectType);
         }
-    }
-
-    /**
-     * A PostgreSQL array literal; null elements stay NULL, everything else is quoted.
-     *
-     * @param  list<string|int|null>  $values
-     */
-    private function array(array $values): string
-    {
-        return '{'.implode(',', array_map(
-            static fn (string|int|null $value): string => $value === null ? 'NULL' : '"'.addcslashes((string) $value, '"\\').'"',
-            $values,
-        )).'}';
     }
 }

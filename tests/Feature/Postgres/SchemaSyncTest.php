@@ -65,6 +65,11 @@ function describeChanges(array $changes): array
     return array_map(static fn (SchemaChange $change): string => $change->action.' '.$change->subject, $changes);
 }
 
+beforeEach(function (): void {
+    // Truncation empties the state table; `--check` also reports types that are not installed.
+    sync()->apply();
+});
+
 afterEach(function (): void {
     DB::purge('second');
     DB::statement('RESET ROLE');

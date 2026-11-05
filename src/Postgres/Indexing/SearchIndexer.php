@@ -9,6 +9,7 @@ use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Events\SearchIndexChanged;
 use Happenv\ModelSearch\Events\SearchIndexLagging;
+use Happenv\ModelSearch\Exceptions\DrainInsideTransaction;
 use Happenv\ModelSearch\Jobs\DrainSearchIndex;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
@@ -42,6 +43,12 @@ final class SearchIndexer
     /** @var array<string, string> */
     private array $fingerprints = [];
 
+    /** @var list<int> Log rows this drain has applied only in part (an unowned type also reads them) and must not read again. */
+    private array $skipIds = [];
+
+    /** @var array<string, true> Types whose rebuild step failed in this drain. */
+    private array $skippedRebuilds = [];
+
     public function __construct(
         private readonly ModelSearchRegistry $registry,
         private readonly IndexState $state,
@@ -61,6 +68,14 @@ final class SearchIndexer
         if ($definitions === []) {
             return $stats;
         }
+
+        // Under the test harness the whole test runs in one transaction, so one level is the baseline.
+        if ($this->db()->transactionLevel() > (app()->runningUnitTests() ? 1 : 0)) {
+            throw new DrainInsideTransaction('A drain must not run inside an open transaction: its advisory lock and its events would leak into the caller\'s transaction.');
+        }
+
+        $this->skipIds = [];
+        $this->skippedRebuilds = [];
 
         $budget = $budgetMs ?? (int) config('model-search.drain.budget_ms', 50000);
         $deadline = hrtime(true) + max(0, $budget) * 1_000_000;
@@ -148,35 +163,81 @@ final class SearchIndexer
         $db = $this->db();
         $changes = $this->names()->quoted($this->names()->changes());
 
-        $outcome = $db->transaction(function () use ($db, $definitions, $changes, $batch): ?bool {
+        $ownership = $this->ownership($definitions);
+        $owned = array_filter($definitions, static fn (CompiledDefinition $definition): bool => $ownership[$definition->morphAlias]);
+        $readable = [];
+        $foreign = [];
+        $known = [];
+
+        foreach ($definitions as $definition) {
+            foreach ($this->resolver()->nodeTypesOf($definition) as $type) {
+                $known[$type] = true;
+
+                if ($ownership[$definition->morphAlias]) {
+                    $readable[$type] = true;
+                } else {
+                    $foreign[$type] = true;
+                }
+            }
+        }
+
+        $outcome = $db->transaction(function () use ($db, $owned, $changes, $batch, $readable, $foreign, $known): ?bool {
             if (! $this->lock($db)) {
                 return null;
             }
 
-            $rows = $db->select(sprintf('SELECT "id", "node_type", "node_id" FROM %s ORDER BY "id" LIMIT %d', $changes, max(1, (int) config('model-search.drain.rows', 5000))));
+            // Rows of types only an unowned definition reads stay where they are; rows of types nobody
+            // knows are read only once they are older than the grace period, so they never stall the batch.
+            $rows = $db->select(
+                sprintf(
+                    'SELECT "id", "node_type", "node_id" FROM %s WHERE ("node_type" = ANY(?::text[]) OR ("node_type" <> ALL(?::text[]) AND "changed_at" < clock_timestamp() - make_interval(secs => ?::double precision))) AND "id" <> ALL(?::bigint[]) ORDER BY "id" LIMIT %d',
+                    $changes,
+                    max(1, (int) config('model-search.drain.rows', 5000)),
+                ),
+                [Sql::arrayLiteral(array_map(strval(...), array_keys($readable))), Sql::arrayLiteral(array_map(strval(...), array_keys($known))), max(0, (int) config('model-search.drain.unknown_grace_seconds', 3600)), Sql::arrayLiteral($this->skipIds)],
+            );
 
             if ($rows === []) {
                 return false;
             }
 
-            [$consumed, $nodes] = $this->dedupe($rows);
+            [$read, $nodes] = $this->dedupe($rows);
+
+            // A row an unowned type also reads is applied for the owned types and left in the log.
+            $consumed = [];
+
+            foreach ($rows as $row) {
+                if (! in_array((int) $row->id, $read, true)) {
+                    continue;
+                }
+
+                if (isset($foreign[(string) $row->node_type])) {
+                    $this->skipIds[] = (int) $row->id;
+                } else {
+                    $consumed[] = (int) $row->id;
+                }
+            }
 
             $batch->logBatches++;
-            $batch->logRowsRead = count($consumed);
+            $batch->logRowsRead = count($read);
             $batch->nodes = count($nodes);
 
             $cap = max((int) config('model-search.drain.rows', 5000), (int) config('model-search.drain.nodes', 1000), 1);
+            $resolved = $this->resolver()->resolve($db, $owned, $nodes, $batch, $cap);
+            $this->resolver()->defer($db, $resolved['deferred']);
 
-            foreach ($this->resolver()->resolve($db, $definitions, $nodes, $batch) as $alias => $rootIds) {
+            foreach ($resolved['roots'] as $alias => $rootIds) {
                 if (count($rootIds) > $cap) {
                     $batch->spilledRoots += $this->resolver()->spill($db, $alias, array_slice($rootIds, $cap));
                     $rootIds = array_slice($rootIds, 0, $cap);
                 }
 
-                $this->reindex($definitions[$alias], $rootIds, $batch);
+                $this->reindex($owned[$alias], $rootIds, $batch);
             }
 
-            $db->affectingStatement(sprintf('DELETE FROM %s WHERE "id" = ANY(?::bigint[])', $changes), ['{'.implode(',', $consumed).'}']);
+            if ($consumed !== []) {
+                $db->affectingStatement(sprintf('DELETE FROM %s WHERE "id" = ANY(?::bigint[])', $changes), [Sql::arrayLiteral($consumed)]);
+            }
 
             return true;
         });
@@ -205,7 +266,33 @@ final class SearchIndexer
         $batch = new DrainStats;
         $db = $this->db();
 
-        $outcome = $db->transaction(function () use ($db, $definition, $batch): ?bool {
+        try {
+            $outcome = $this->rebuildStep($db, $definition, $batch);
+        } catch (Throwable $failure) {
+            if (PoisonRecords::isTransient($failure)) {
+                throw $failure;
+            }
+
+            // One type's broken rebuild must not stop the log or the other types: report it and leave it for the next drain.
+            report($failure);
+            $this->skippedRebuilds[$definition->morphAlias] = true;
+
+            return true;
+        }
+
+        foreach ($batch->rebuiltTypes as $type) {
+            $this->state->forget($type);
+        }
+
+        $this->announce($batch);
+        $total->merge($batch);
+
+        return $outcome;
+    }
+
+    private function rebuildStep(Connection $db, CompiledDefinition $definition, DrainStats $batch): ?bool
+    {
+        return $db->transaction(function () use ($db, $definition, $batch): ?bool {
             if (! $this->lock($db)) {
                 return null;
             }
@@ -250,21 +337,12 @@ final class SearchIndexer
 
             return true;
         });
-
-        foreach ($batch->rebuiltTypes as $type) {
-            $this->state->forget($type);
-        }
-
-        $this->announce($batch);
-        $total->merge($batch);
-
-        return $outcome;
     }
 
     /**
-     * A type whose rebuild is pending and that this release may rebuild: the index has never been
-     * complete, or this release's definition is the one the install recorded. A release that merely
-     * differs (the previous one, during a blue/green deploy) leaves the rebuild to the owner.
+     * A type whose rebuild is pending and that this release owns: its definition is the one the
+     * install recorded. A release that merely differs (the previous one, during a blue/green deploy)
+     * leaves the rebuild to the owner, also while the index has never been complete.
      *
      * @param  array<string, CompiledDefinition>  $definitions
      */
@@ -273,11 +351,11 @@ final class SearchIndexer
         foreach ($this->state->pendingRebuilds() as $row) {
             $definition = $definitions[$row['subject_type']] ?? null;
 
-            if ($definition === null) {
+            if ($definition === null || isset($this->skippedRebuilds[$row['subject_type']])) {
                 continue;
             }
 
-            if ($row['ready_at'] === null || $row['definition_fingerprint'] === $this->fingerprint($definition)) {
+            if ($row['definition_fingerprint'] === $this->fingerprint($definition)) {
                 return $definition;
             }
         }
@@ -296,17 +374,20 @@ final class SearchIndexer
         $entries = $this->names()->quoted($this->names()->entries());
         $keys = $this->names()->quoted($this->names()->keys());
 
+        $type = $definition->resolvedKeySqlType();
+        $source = sprintf('SELECT 1 FROM %s AS r WHERE r.%s = %%s::%s%s', Sql::table($model), Sql::ident($model->getKeyName()), $type, $soft === null ? '' : sprintf(' AND r.%s IS NULL', Sql::ident($soft)));
+
+        // Entries whose root is gone, and key rows whose root is gone (also those without an entry).
         $row = $db->selectOne(
             sprintf(
-                'WITH "gone" AS (SELECT e."subject_id" FROM %1$s AS e WHERE e."subject_type" = ? AND NOT EXISTS (SELECT 1 FROM %2$s AS r WHERE r.%3$s::text = e."subject_id"%4$s) LIMIT %5$d), "deleted_keys" AS (DELETE FROM %6$s AS k USING "gone" AS g WHERE k."subject_type" = ? AND k."subject_id" = g."subject_id" RETURNING 1), "deleted_entries" AS (DELETE FROM %1$s AS e USING "gone" AS g WHERE e."subject_type" = ? AND e."subject_id" = g."subject_id" RETURNING 1) SELECT (SELECT count(*) FROM "deleted_entries") AS "entries", (SELECT count(*) FROM "deleted_keys") AS "keys"',
+                'WITH "gone" AS (SELECT u."subject_id" FROM (SELECT e."subject_id" FROM %1$s AS e WHERE e."subject_type" = ? AND NOT EXISTS (%3$s) UNION SELECT k."subject_id" FROM %2$s AS k WHERE k."subject_type" = ? AND NOT EXISTS (%4$s)) AS u LIMIT %5$d), "deleted_keys" AS (DELETE FROM %2$s AS k USING "gone" AS g WHERE k."subject_type" = ? AND k."subject_id" = g."subject_id" RETURNING 1), "deleted_entries" AS (DELETE FROM %1$s AS e USING "gone" AS g WHERE e."subject_type" = ? AND e."subject_id" = g."subject_id" RETURNING 1) SELECT (SELECT count(*) FROM "gone") AS "gone", (SELECT count(*) FROM "deleted_entries") AS "entries", (SELECT count(*) FROM "deleted_keys") AS "keys"',
                 $entries,
-                Sql::table($model),
-                Sql::ident($model->getKeyName()),
-                $soft === null ? '' : sprintf(' AND r.%s IS NULL', Sql::ident($soft)),
-                $limit,
                 $keys,
+                sprintf($source, 'e."subject_id"'),
+                sprintf($source, 'k."subject_id"'),
+                $limit,
             ),
-            [$definition->morphAlias, $definition->morphAlias, $definition->morphAlias],
+            [$definition->morphAlias, $definition->morphAlias, $definition->morphAlias, $definition->morphAlias],
         );
 
         if (! $row instanceof stdClass) {
@@ -322,7 +403,7 @@ final class SearchIndexer
             $batch->touch($definition->morphAlias);
         }
 
-        return $removed;
+        return (int) $row->gone;
     }
 
     /**
@@ -339,7 +420,7 @@ final class SearchIndexer
         $bindings = [];
 
         if ($cursor !== '') {
-            $conditions[] = sprintf('"r".%s > ?::%s', $key, $definition->keySqlType ?? 'text');
+            $conditions[] = sprintf('"r".%s > ?::%s', $key, $definition->resolvedKeySqlType());
             $bindings[] = $cursor;
         }
 
@@ -362,8 +443,8 @@ final class SearchIndexer
     }
 
     /**
-     * Recomputes the projection of the given roots. A failing batch is retried record by record;
-     * a record that still fails goes to the failures table and the rest carry on.
+     * Recomputes the projection of the given roots. A failing batch is split in halves until the
+     * failing record stands alone; that record goes to the failures table and the rest carry on.
      *
      * @param  list<string>  $ids
      */
@@ -383,19 +464,18 @@ final class SearchIndexer
             if (PoisonRecords::isTransient($failure)) {
                 throw $failure;
             }
+
+            if (count($ids) === 1) {
+                $this->poison()->record($db, $definition->morphAlias, $ids[0], $failure);
+                $batch->poisoned++;
+
+                return;
+            }
         }
 
-        foreach ($ids as $id) {
-            try {
-                $batch->merge($db->transaction(fn (): DrainStats => $this->reindexAll($definition, [$id])));
-            } catch (Throwable $failure) {
-                if (PoisonRecords::isTransient($failure)) {
-                    throw $failure;
-                }
-
-                $this->poison()->record($db, $definition->morphAlias, $id, $failure);
-                $batch->poisoned++;
-            }
+        // Bisect: the halves that succeed are written, the poison record is cornered in about log2(n) steps.
+        foreach (array_chunk($ids, max(1, intdiv(count($ids) + 1, 2))) as $half) {
+            $this->reindex($definition, $half, $batch);
         }
     }
 
@@ -469,7 +549,7 @@ final class SearchIndexer
 
             $rows = $db->select(
                 sprintf('UPDATE %s SET "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp() WHERE "subject_type" = ANY(?::text[]) RETURNING "subject_type"', $this->names()->quoted($this->names()->state())),
-                ['{'.implode(',', array_map(static fn (string $type): string => '"'.addcslashes($type, '"\\').'"', $candidates)).'}'],
+                [Sql::arrayLiteral($candidates)],
             );
 
             $switched = array_map(static fn (stdClass $row): string => (string) $row->subject_type, $rows);
@@ -489,7 +569,7 @@ final class SearchIndexer
             if ($discard !== []) {
                 $batch->logRowsDiscarded += $db->affectingStatement(
                     sprintf('DELETE FROM %s WHERE "node_type" = ANY(?::text[])', $changes),
-                    ['{'.implode(',', array_map(static fn (string $type): string => '"'.addcslashes($type, '"\\').'"', $discard)).'}'],
+                    [Sql::arrayLiteral($discard)],
                 );
             }
 
@@ -565,6 +645,25 @@ final class SearchIndexer
         }
 
         return $definitions;
+    }
+
+    /**
+     * Whether this release owns each type: it has no state row yet, or the stored fingerprint is
+     * the fingerprint of this release's definition.
+     *
+     * @param  array<string, CompiledDefinition>  $definitions
+     * @return array<string, bool>
+     */
+    private function ownership(array $definitions): array
+    {
+        $stored = $this->state->fingerprints();
+        $owned = [];
+
+        foreach ($definitions as $alias => $definition) {
+            $owned[$alias] = ! isset($stored[$alias]) || $stored[$alias] === $this->fingerprint($definition);
+        }
+
+        return $owned;
     }
 
     private function fingerprint(CompiledDefinition $definition): string

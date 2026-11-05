@@ -63,12 +63,12 @@ final class Sql
     }
 
     /**
-     * @param  list<string|int>  $values
+     * @param  list<string|int|null>  $values  A null element stays NULL.
      */
     public static function arrayLiteral(array $values): string
     {
         return '{'.implode(',', array_map(
-            static fn (string|int $value): string => '"'.addcslashes((string) $value, '"\\').'"',
+            static fn (string|int|null $value): string => $value === null ? 'NULL' : '"'.addcslashes((string) $value, '"\\').'"',
             $values,
         )).'}';
     }

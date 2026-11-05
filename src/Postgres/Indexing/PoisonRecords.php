@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Postgres\Indexing;
 
+use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Illuminate\Database\Connection;
 use Illuminate\Database\DeadlockException;
@@ -60,7 +61,7 @@ final readonly class PoisonRecords
 
         $db->affectingStatement(
             sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $this->table()),
-            [$subjectType, '{'.implode(',', array_map(static fn (string $id): string => '"'.addcslashes($id, '"\\').'"', $subjectIds)).'}'],
+            [$subjectType, Sql::arrayLiteral($subjectIds)],
         );
     }
 
@@ -77,12 +78,12 @@ final readonly class PoisonRecords
 
         if ($subjectTypes !== null) {
             $where .= ' AND "subject_type" = ANY(?::text[])';
-            $bindings[] = $this->array($subjectTypes);
+            $bindings[] = Sql::arrayLiteral($subjectTypes);
         }
 
         if ($subjectIds !== null) {
             $where .= ' AND "subject_id" = ANY(?::text[])';
-            $bindings[] = $this->array($subjectIds);
+            $bindings[] = Sql::arrayLiteral($subjectIds);
         }
 
         return $db->transaction(function () use ($db, $where, $bindings): int {
@@ -109,32 +110,16 @@ final readonly class PoisonRecords
             return 0;
         }
 
-        $due = sprintf(
-            '"subject_type" = ANY(?::text[]) AND "attempts" < %d AND "last_failed_at" < clock_timestamp() - interval \'%d hours\'',
-            self::MAX_AUTOMATIC_ATTEMPTS,
-            self::RETRY_AFTER_HOURS,
+        return $db->affectingStatement(
+            sprintf(
+                'WITH "due" AS (UPDATE %1$s SET "last_failed_at" = clock_timestamp() WHERE "subject_type" = ANY(?::text[]) AND "attempts" < %2$d AND "last_failed_at" < clock_timestamp() - interval \'%3$d hours\' RETURNING "subject_type", "subject_id") INSERT INTO %4$s ("node_type", "node_id") SELECT "subject_type", "subject_id" FROM "due"',
+                $this->table(),
+                self::MAX_AUTOMATIC_ATTEMPTS,
+                self::RETRY_AFTER_HOURS,
+                $this->names->quoted($this->names->changes()),
+            ),
+            [Sql::arrayLiteral($knownTypes)],
         );
-
-        return $db->transaction(function () use ($db, $due, $knownTypes): int {
-            $queued = $db->affectingStatement(
-                sprintf('INSERT INTO %s ("node_type", "node_id") SELECT "subject_type", "subject_id" FROM %s WHERE %s', $this->names->quoted($this->names->changes()), $this->table(), $due),
-                [$this->array($knownTypes)],
-            );
-
-            if ($queued > 0) {
-                $db->affectingStatement(sprintf('UPDATE %s SET "last_failed_at" = clock_timestamp() WHERE %s', $this->table(), $due), [$this->array($knownTypes)]);
-            }
-
-            return $queued;
-        });
-    }
-
-    /**
-     * @param  list<string>  $values
-     */
-    private function array(array $values): string
-    {
-        return '{'.implode(',', array_map(static fn (string $value): string => '"'.addcslashes($value, '"\\').'"', $values)).'}';
     }
 
     private function table(): string

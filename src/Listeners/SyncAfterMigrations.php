@@ -8,6 +8,7 @@ use Happenv\ModelSearch\Exceptions\SchemaSyncIncomplete;
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
 use Illuminate\Database\Events\MigrationsEnded;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Installs the derived triggers and indexes after every `migrate`, so a new definition, a new
@@ -33,6 +34,18 @@ final readonly class SyncAfterMigrations
             return;
         }
 
-        $this->sync->apply();
+        $outcome = $this->sync->apply();
+
+        foreach ($outcome->refusals as $refusal) {
+            // A downgrade is the previous release running `migrate` during a blue/green deploy: it
+            // must not fail the deploy, only say that it left the type alone.
+            if ($refusal->isDowngrade) {
+                Log::warning($refusal->getMessage());
+
+                continue;
+            }
+
+            throw $refusal;
+        }
     }
 }

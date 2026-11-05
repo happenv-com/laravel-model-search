@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Postgres\Schema;
 
+use Happenv\ModelSearch\Compilation\Fingerprint;
 use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Compilation\WatchedTable;
+use Happenv\ModelSearch\Exceptions\InstallRefused;
 use Happenv\ModelSearch\Exceptions\MissingExtension;
 use Happenv\ModelSearch\Exceptions\NotTableOwner;
 use Happenv\ModelSearch\Exceptions\SchemaNotInstalled;
 use Happenv\ModelSearch\Exceptions\SchemaSyncIncomplete;
+use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Illuminate\Database\Connection;
 use Illuminate\Database\QueryException;
@@ -194,15 +197,92 @@ final readonly class SchemaSync
 
         foreach ($changes as $change) {
             if (! $this->executeWithRetry($change)) {
-                $left[] = $change->subject;
+                $left[] = $change;
             }
         }
 
+        [$installs, $refusals] = $this->install($left);
+
         if ($left !== []) {
-            throw SchemaSyncIncomplete::leaving($left);
+            throw SchemaSyncIncomplete::leaving(array_map(static fn (SchemaChange $change): string => $change->subject, $left));
         }
 
-        return new SyncOutcome($changes);
+        return new SyncOutcome($changes, null, $installs, $refusals);
+    }
+
+    /**
+     * Records the install of every registered type whose triggers and indexes are complete.
+     * A type with an object that could not be completed this run is skipped; an install the state
+     * refuses is reported and does not stop the others.
+     *
+     * @param  list<SchemaChange>  $left  The changes that could not be applied.
+     * @return array{array<string, string>, list<InstallRefused>}
+     */
+    private function install(array $left): array
+    {
+        $state = new IndexState($this->connection);
+        $blockedTables = [];
+        $indexesLeft = false;
+
+        foreach ($left as $change) {
+            if ($change->kind === 'index') {
+                $indexesLeft = true;
+            }
+
+            foreach ($change->relations as $relation) {
+                $blockedTables[$relation] = true;
+            }
+        }
+
+        $installs = [];
+        $refusals = [];
+        $connection = $this->db()->getName();
+
+        foreach ($this->registry->all() as $definition) {
+            $tables = array_map(static fn (WatchedTable $table): string => $table->quotedTable, array_filter($definition->watchedTables(), static fn (WatchedTable $table): bool => $table->connection === $connection));
+
+            if ($indexesLeft || array_intersect($tables, array_keys($blockedTables)) !== []) {
+                $installs[$definition->morphAlias] = 'skipped';
+
+                continue;
+            }
+
+            try {
+                $installs[$definition->morphAlias] = $state->recordInstall($definition)->value;
+            } catch (InstallRefused $refusal) {
+                $installs[$definition->morphAlias] = 'refused';
+                $refusals[] = $refusal;
+            }
+        }
+
+        ksort($installs);
+
+        return [$installs, $refusals];
+    }
+
+    /**
+     * Registered types that are not installed, or whose stored fingerprint is not the current one.
+     *
+     * @return array<string, string> Morph alias => reason.
+     */
+    public function uninstalled(): array
+    {
+        $state = new IndexState($this->connection);
+        $reasons = [];
+
+        foreach ($this->registry->all() as $definition) {
+            $row = $state->find($definition->morphAlias);
+
+            if ($row === null) {
+                $reasons[$definition->morphAlias] = 'not installed';
+            } elseif ($row['definition_fingerprint'] !== Fingerprint::of($definition)) {
+                $reasons[$definition->morphAlias] = 'stored fingerprint differs from the current definition';
+            }
+        }
+
+        ksort($reasons);
+
+        return $reasons;
     }
 
     /**

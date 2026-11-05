@@ -6,6 +6,7 @@ use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\SearchField;
 use Happenv\ModelSearch\Events\SearchIndexChanged;
 use Happenv\ModelSearch\Events\SearchIndexLagging;
+use Happenv\ModelSearch\Exceptions\DrainInsideTransaction;
 use Happenv\ModelSearch\Exceptions\InstallRefused;
 use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Happenv\ModelSearch\Postgres\Indexing\InstallOutcome;
@@ -16,12 +17,19 @@ use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Parcel;
 use Happenv\ModelSearch\Tests\Fixtures\Normalizers\HookedNormalizer;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Str;
 
 covers(SearchIndexer::class);
+
+beforeEach(function (): void {
+    // The migration listener installed the fixture types; these tests start from "nothing installed".
+    DB::table(TableNames::forConnection()->state())->delete();
+});
 
 afterEach(function (): void {
     ConfigurableOrderSearch::reset();
@@ -538,9 +546,10 @@ describe('poison records and unknown nodes', function (): void {
     });
 
     it('unknown node type is skipped, not thrown', function (): void {
+        $old = now()->subHours(2);
         DB::table(ixTable('changes'))->insert([
-            ['node_type' => 'ghost', 'node_id' => '1'],
-            ['node_type' => 'table:no_longer_watched', 'node_id' => 'abc'],
+            ['node_type' => 'ghost', 'node_id' => '1', 'changed_at' => $old],
+            ['node_type' => 'table:no_longer_watched', 'node_id' => 'abc', 'changed_at' => $old],
         ]);
 
         $stats = ixIndexer()->drainNow();
@@ -729,10 +738,11 @@ describe('installing', function (): void {
     });
 
     it('a newer version keeps the index served and starts a rebuild', function (): void {
-        $first = ixDefinition(ixRegistry());
+        $registry = ixRegistry();
+        $first = ixDefinition($registry);
         $state = new IndexState;
         $state->recordInstall($first);
-        ixIndexer()->drainNow();
+        ixIndexer($registry)->drainNow();
         expect($state->isReady('order'))->toBeTrue();
 
         ConfigurableOrderSearch::$definitionVersion = 2;
@@ -805,7 +815,7 @@ describe('observability', function (): void {
 
     it('dispatches SearchIndexLagging when the oldest change waited too long', function (): void {
         Event::fake([SearchIndexLagging::class]);
-        DB::statement(sprintf("INSERT INTO %s (node_type, node_id, changed_at) VALUES ('ghost', 'x', clock_timestamp() - interval '10 minutes')", ixTable('changes')));
+        DB::statement(sprintf("INSERT INTO %s (node_type, node_id, changed_at) VALUES ('order', 'x', clock_timestamp() - interval '10 minutes')", ixTable('changes')));
 
         ixIndexer()->drain(0);
 
@@ -838,5 +848,231 @@ describe('observability', function (): void {
         expect(Artisan::call('model-search:drain'))->toBe(0)
             ->and(Artisan::output())->toContain('Roots recomputed')
             ->and(DB::table(ixTable('entries'))->where('subject_type', 'order')->count())->toBe(1);
+    });
+});
+
+describe('blue-green ownership (R14)', function (): void {
+    it('a release applies the log and rebuilds only the types it owns', function (): void {
+        $v1 = ixRegistry();
+        ConfigurableOrderSearch::$definitionVersion = 2;
+        $v2 = ixRegistry();
+        $state = new IndexState;
+
+        $state->recordInstall(ixDefinition($v1));
+        ixIndexer($v1)->drainNow();
+        $state->recordInstall(ixDefinition($v2));
+
+        $id = ixOrder(['customer_name' => 'Ann Kowalska']);
+        $old = ixIndexer($v1)->drainNow();
+
+        // The previous release neither applies the rows nor rebuilds, and leaves the rows where they are.
+        expect($old->logRowsRead)->toBe(0)
+            ->and($old->rebuildBatches)->toBe(0)
+            ->and(ixLog())->toBe(['order|'.$id])
+            ->and(ixKeys('order', $id))->toBe([])
+            ->and($state->find('order')['rebuild_cursor'])->toBe('');
+
+        $new = ixIndexer($v2)->drainNow();
+
+        expect($new->rebuiltTypes)->toBe(['order'])
+            ->and(ixLog())->toBe([])
+            ->and(ixKeys('order', $id))->toContain('name_word|ann');
+    });
+
+    it('never leaves a pending rebuild to a release that does not own the type, even when the index was never ready', function (): void {
+        $v1 = ixRegistry();
+        ConfigurableOrderSearch::$definitionVersion = 2;
+        $v2 = ixRegistry();
+        $state = new IndexState;
+        $state->recordInstall(ixDefinition($v2));
+
+        expect($state->find('order')['ready_at'])->toBeNull()
+            ->and(ixIndexer($v1)->drainNow()->rebuildBatches)->toBe(0)
+            ->and(ixIndexer($v2)->drainNow()->rebuiltTypes)->toBe(['order']);
+    });
+
+    it('applies the owned part of a node that an unowned type also reads, and keeps the row', function (): void {
+        $v1 = ixRegistry();
+        ConfigurableOrderSearch::$definitionVersion = 2;
+        $v2 = ixRegistry();
+        $state = new IndexState;
+        $state->recordInstall(ixDefinition($v1));
+        ixIndexer($v1)->drainNow();
+        $state->recordInstall(ixDefinition($v2));
+
+        $address = ixAddress(['phone' => '111']);
+        ixOrder(['billing_address_id' => $address]);
+        ixIndexer($v1)->drainNow();
+
+        // `table:addresses` is read only by the order definition, which v1 does not own: row kept.
+        expect(DB::table(ixTable('changes'))->where('node_type', 'table:addresses')->count())->toBe(1);
+        ixIndexer($v2)->drainNow();
+        expect(DB::table(ixTable('changes'))->count())->toBe(0);
+    });
+
+    it('deletes an unknown node only after the grace period', function (): void {
+        DB::table(ixTable('changes'))->insert([
+            ['node_type' => 'ghost', 'node_id' => 'young', 'changed_at' => now()->subMinutes(5)],
+            ['node_type' => 'ghost', 'node_id' => 'old', 'changed_at' => now()->subHours(2)],
+        ]);
+
+        $stats = ixIndexer()->drainNow();
+
+        expect($stats->unknownNodes)->toBe(1)
+            ->and(ixLog())->toBe(['ghost|young']);
+
+        config(['model-search.drain.unknown_grace_seconds' => 60]);
+        ixIndexer()->drainNow();
+
+        expect(ixLog())->toBe([]);
+    });
+
+    it('does not let young unknown rows stall the batch', function (): void {
+        config(['model-search.drain.rows' => 2]);
+        DB::table(ixTable('changes'))->insert([
+            ['node_type' => 'ghost', 'node_id' => '1', 'changed_at' => now()],
+            ['node_type' => 'ghost', 'node_id' => '2', 'changed_at' => now()],
+        ]);
+        $id = ixOrder();
+
+        ixIndexer()->drainNow();
+
+        expect(ixKeys('order', $id))->not->toBe([])
+            ->and(ixLog())->toHaveCount(2);
+    });
+});
+
+describe('a single error does not wedge the drain (I2)', function (): void {
+    it('a malformed log row is counted and removed, the drain proceeds', function (): void {
+        DB::table(ixTable('changes'))->insert(['node_type' => 'table:addresses', 'node_id' => 'not-a-uuid']);
+        $id = ixOrder();
+
+        $stats = ixIndexer()->drainNow();
+
+        expect($stats->unresolvableNodes)->toBe(1)
+            ->and(ixKeys('order', $id))->not->toBe([])
+            ->and(ixLog())->toBe([]);
+    });
+
+    it('keeps the good nodes of a type that also holds a malformed one', function (): void {
+        $address = ixAddress(['phone' => '111']);
+        $order = ixOrder(['billing_address_id' => $address]);
+        ixIndexer()->drainNow();
+        DB::table('addresses')->where('id', $address)->update(['phone' => '222']);
+        DB::table(ixTable('changes'))->insert(['node_type' => 'table:addresses', 'node_id' => 'not-a-uuid']);
+
+        $stats = ixIndexer()->drainNow();
+
+        expect($stats->unresolvableNodes)->toBe(1)
+            ->and(ixKeys('order', $order))->toContain('phone|222');
+    });
+
+    it('a rebuild that throws for one type is reported and the log keeps draining', function (): void {
+        Exceptions::fake();
+        $state = new IndexState;
+        $registry = app(ModelSearchRegistry::class);
+        $state->recordInstall($registry->for(Order::class));
+        DB::table(ixTable('state'))->where('subject_type', 'order')->update(['rebuild_cursor' => 'not-a-uuid']);
+        $customer = DB::table('customers')->insertGetId(['name' => 'Ann Kowalska']);
+
+        $stats = ixIndexer()->drainNow();
+
+        expect(ixKeys('customer', (string) $customer))->toContain('name_word|ann')
+            ->and($stats->rebuiltTypes)->toBe([])
+            ->and($state->find('order')['rebuild_cursor'])->toBe('not-a-uuid');
+        Exceptions::assertReported(QueryException::class);
+    });
+});
+
+describe('bounded work (M3, M4, M7)', function (): void {
+    it('stops expanding at the batch cap and writes the remaining nodes back unresolved', function (): void {
+        config(['model-search.drain.rows' => 2, 'model-search.drain.nodes' => 2]);
+        $first = ixAddress(['phone' => '1']);
+        $second = ixAddress(['phone' => '2']);
+
+        foreach (range(1, 3) as $ignored) {
+            ixOrder(['billing_address_id' => $first]);
+            ixOrder(['billing_address_id' => $second]);
+        }
+
+        ixIndexer()->drainNow();
+        DB::table('addresses')->update(['phone' => '9']);
+
+        $stats = ixIndexer()->drain(0);
+
+        expect(DB::table(ixTable('changes'))->where('node_type', 'table:addresses')->count())->toBe(1)
+            ->and($stats->spilledRoots)->toBeGreaterThan(0);
+
+        ixIndexer()->drainNow();
+
+        expect(DB::table(ixTable('keys'))->where('kind', 'phone')->pluck('key')->unique()->values()->all())->toBe(['9']);
+    });
+
+    it('isolates a poison record by bisection', function (): void {
+        ConfigurableOrderSearch::$fields = [SearchField::key('signature')->normalizeUsing(new HookedNormalizer)];
+        $registry = ixRegistry();
+        $calls = 0;
+        HookedNormalizer::$hook = static function (string $value) use (&$calls): void {
+            $calls++;
+
+            if (str_contains($value, 'BOOM')) {
+                throw new RuntimeException('no');
+            }
+        };
+
+        foreach (range(1, 15) as $number) {
+            ixOrder(['signature' => 'GOOD-'.$number]);
+        }
+
+        $bad = ixOrder(['signature' => 'BOOM']);
+        $stats = ixIndexer($registry)->drainNow();
+
+        expect($stats->poisoned)->toBe(1)
+            ->and(DB::table(ixTable('failures'))->value('subject_id'))->toBe($bad)
+            ->and(DB::table(ixTable('entries'))->count())->toBe(15)
+            // one pass over 16 roots + a bisection path of about log2(16) halves, not a pass per record
+            ->and($calls)->toBeLessThan(16 * 4);
+    });
+
+    it('refuses to drain inside an open transaction', function (): void {
+        ixOrder();
+        DB::beginTransaction();
+
+        try {
+            expect(fn () => ixIndexer()->drain(0))->toThrow(DrainInsideTransaction::class);
+        } finally {
+            DB::rollBack();
+        }
+
+        expect(ixLog())->toHaveCount(1);
+    });
+});
+
+describe('internals of the fix round', function (): void {
+    it('sweeps key rows that have no entry', function (): void {
+        $state = new IndexState;
+        $state->recordInstall(app(ModelSearchRegistry::class)->for(Order::class));
+        DB::table(ixTable('keys'))->insert(['subject_type' => 'order', 'subject_id' => (string) Str::uuid(), 'kind' => 'signature', 'key' => 'orphan', 'value' => 'ORPHAN', 'stage' => 0]);
+
+        $stats = ixIndexer()->drainNow();
+
+        expect(DB::table(ixTable('keys'))->count())->toBe(0)
+            ->and($stats->keysDeleted)->toBe(1);
+    });
+
+    it('resolves the key type from the catalog when the definition carries none', function (): void {
+        expect(app(ModelSearchRegistry::class)->for(Order::class)->resolvedKeySqlType())->toBe('uuid');
+    });
+
+    it('requeues due failures in one statement', function (): void {
+        $id = ixOrder();
+        ixIndexer()->drainNow();
+        DB::table(ixTable('failures'))->insert(['subject_type' => 'order', 'subject_id' => $id, 'attempts' => 1, 'last_error_class' => 'X', 'last_failed_at' => now()->subHours(30)]);
+        DB::enableQueryLog();
+        ixIndexer()->drain(0);
+        $statements = array_filter(array_column(DB::getQueryLog(), 'query'), static fn (string $sql): bool => str_contains($sql, 'last_failed_at'));
+        DB::disableQueryLog();
+
+        expect($statements)->toHaveCount(1);
     });
 });

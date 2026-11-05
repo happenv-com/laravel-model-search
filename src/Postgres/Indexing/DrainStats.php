@@ -22,6 +22,9 @@ final class DrainStats
     /** Unique nodes those rows named. */
     public int $nodes = 0;
 
+    /** Nodes that could not be turned into roots (a malformed id, say): removed and counted. */
+    public int $unresolvableNodes = 0;
+
     /** Nodes of a type no registered definition knows: skipped. */
     public int $unknownNodes = 0;
 
@@ -73,6 +76,7 @@ final class DrainStats
         $this->logRowsRead += $other->logRowsRead;
         $this->nodes += $other->nodes;
         $this->unknownNodes += $other->unknownNodes;
+        $this->unresolvableNodes += $other->unresolvableNodes;
         $this->roots += $other->roots;
         $this->spilledRoots += $other->spilledRoots;
         $this->entriesWritten += $other->entriesWritten;

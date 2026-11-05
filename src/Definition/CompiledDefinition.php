@@ -96,6 +96,20 @@ final readonly class CompiledDefinition
     }
 
     /**
+     * The catalog type of the root's key column (the stored one, or looked up from the catalog).
+     */
+    public function resolvedKeySqlType(): string
+    {
+        if ($this->keySqlType !== null) {
+            return $this->keySqlType;
+        }
+
+        $model = new ($this->modelClass);
+
+        return new ColumnTypes()->of($model, $model->getTable(), $model->getKeyName());
+    }
+
+    /**
      * The stage of each given root, computed in SQL without hydrating any model: one row per
      * existing root with its `root_id` (text) and `stage` (the index of the first constrained
      * stage it falls in, or {@see self::ALL_STAGE}).
@@ -110,7 +124,7 @@ final readonly class CompiledDefinition
     {
         $model = new ($this->modelClass);
         $key = Sql::ident($model->getKeyName());
-        $type = $this->keySqlType ?? new ColumnTypes()->of($model, $model->getTable(), $model->getKeyName());
+        $type = $this->resolvedKeySqlType();
         $bindings = [];
         $cases = '';
 

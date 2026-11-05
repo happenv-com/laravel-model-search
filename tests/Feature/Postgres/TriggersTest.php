@@ -159,11 +159,15 @@ describe('triggers installed by the migration listener', function (): void {
     });
 
     it('truncate marks every root type that reads the table', function (): void {
+        // The migration listener has installed every fixture type already: start from rows with no rebuild pending.
         foreach (['order', 'parcel', 'invoice'] as $type) {
-            DB::table(TableNames::forConnection()->state())->insert([
-                'subject_type' => $type, 'definition_fingerprint' => 'f', 'definition_version' => 1, 'installed_at' => now(),
-            ]);
+            DB::table(TableNames::forConnection()->state())->updateOrInsert(
+                ['subject_type' => $type],
+                ['definition_fingerprint' => 'f', 'definition_version' => 1, 'installed_at' => now(), 'rebuild_cursor' => null, 'rebuild_started_at' => null],
+            );
         }
+
+        DB::table(TableNames::forConnection()->state())->update(['rebuild_cursor' => null, 'rebuild_started_at' => null]);
 
         DB::statement('TRUNCATE addresses');
 

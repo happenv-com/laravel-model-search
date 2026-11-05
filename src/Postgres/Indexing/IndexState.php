@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Postgres\Indexing;
 
 use Happenv\ModelSearch\Compilation\Fingerprint;
+use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Exceptions\InstallRefused;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
@@ -24,6 +25,11 @@ use Throwable;
  * from taking a type back, and it does not take over a type whose stored fingerprint differs at the
  * same version. A changed definition resets the rebuild cursor but keeps `ready_at`: the index is
  * served in its old shape while the rebuild replaces it, so there is no window without search.
+ *
+ * Ownership: a release applies the change log and rebuilds a type only when the type has no state
+ * row or the stored fingerprint equals the fingerprint of the release's own definition. Reverting
+ * to an older release therefore requires bumping `ModelSearch::version()` and installing again;
+ * otherwise no release owns the type and its log rows wait.
  *
  * `ready_at` is cached for a few seconds as a plain boolean; the cache is only a way to spare the
  * database on the hot path, never a source of truth.
@@ -158,13 +164,29 @@ final readonly class IndexState
 
         $rows = $this->db()->select(
             sprintf('UPDATE %s SET "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp() WHERE "subject_type" = ANY(?::text[]) RETURNING "subject_type"', $this->table()),
-            [$this->textArray($subjectTypes)],
+            [Sql::arrayLiteral($subjectTypes)],
         );
 
         $marked = array_map(static fn (stdClass $row): string => (string) $row->subject_type, $rows);
         sort($marked);
 
         return $marked;
+    }
+
+    /**
+     * The fingerprint each installed type was installed for.
+     *
+     * @return array<string, string>
+     */
+    public function fingerprints(): array
+    {
+        $fingerprints = [];
+
+        foreach ($this->db()->select(sprintf('SELECT "subject_type", "definition_fingerprint" FROM %s', $this->table())) as $row) {
+            $fingerprints[(string) $row->subject_type] = (string) $row->definition_fingerprint;
+        }
+
+        return $fingerprints;
     }
 
     public function forget(string $subjectType): void
@@ -191,14 +213,6 @@ final readonly class IndexState
             'rebuild_cursor' => isset($row['rebuild_cursor']) ? (string) $row['rebuild_cursor'] : null,
             'rebuild_started_at' => isset($row['rebuild_started_at']) ? (string) $row['rebuild_started_at'] : null,
         ];
-    }
-
-    /**
-     * @param  list<string>  $values
-     */
-    private function textArray(array $values): string
-    {
-        return '{'.implode(',', array_map(static fn (string $value): string => '"'.addcslashes($value, '"\\').'"', $values)).'}';
     }
 
     private function cacheKey(string $subjectType): string

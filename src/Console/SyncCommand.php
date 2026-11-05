@@ -49,9 +49,19 @@ final class SyncCommand extends Command
             $this->components->twoColumnDetail($change->describe(), 'done');
         }
 
+        foreach ($outcome->installs as $type => $result) {
+            if ($result !== 'unchanged') {
+                $this->components->twoColumnDetail('install '.$type, $result);
+            }
+        }
+
+        foreach ($outcome->refusals as $refusal) {
+            $this->components->error($refusal->getMessage());
+        }
+
         $this->components->info($outcome->applied === [] ? 'Triggers and indexes are in sync.' : sprintf('%d change(s) applied.', count($outcome->applied)));
 
-        return self::SUCCESS;
+        return $outcome->refusals === [] ? self::SUCCESS : self::FAILURE;
     }
 
     private function report(SchemaSync $sync): int
@@ -83,13 +93,19 @@ final class SyncCommand extends Command
             return self::SUCCESS;
         }
 
-        if ($changes === []) {
+        $uninstalled = $sync->uninstalled();
+
+        foreach ($uninstalled as $type => $reason) {
+            $this->components->warn(sprintf('%s: %s', $type, $reason));
+        }
+
+        if ($changes === [] && $uninstalled === []) {
             $this->components->info($obsolete === [] ? 'Triggers and indexes are in sync.' : 'Triggers and indexes are in sync; run with --prune to remove what is no longer planned.');
 
             return self::SUCCESS;
         }
 
-        $this->components->error(sprintf('Drift found in %d object(s); run model-search:sync.', count($changes)));
+        $this->components->error(sprintf('Drift found in %d object(s) and %d type(s); run model-search:sync.', count($changes), count($uninstalled)));
 
         return self::FAILURE;
     }
