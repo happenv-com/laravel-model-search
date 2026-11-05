@@ -92,6 +92,8 @@ final class Fingerprint
             'translatable' => $field->translatable,
             'normalizer' => self::normalizer($field),
             'contribution' => self::contribution($field),
+            // Only present when true: a definition installed before each() existed keeps its fingerprint.
+            ...($field->each ? ['each' => true] : []),
         ];
     }
 

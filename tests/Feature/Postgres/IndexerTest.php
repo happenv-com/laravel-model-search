@@ -1358,3 +1358,43 @@ describe('the allowed transaction level (M7)', function (): void {
         expect((require __DIR__.'/../../../config/model-search.php')['drain']['allowed_transaction_level'])->toBe(0);
     });
 });
+
+describe('due failures', function (): void {
+    function ixPark(int $attempts, string $age): void
+    {
+        DB::table(ixTable('failures'))->insert([
+            'subject_type' => 'order',
+            'subject_id' => (string) Str::uuid(),
+            'attempts' => $attempts,
+            'last_error_class' => RuntimeException::class,
+            'last_failed_at' => DB::raw(sprintf("clock_timestamp() - interval '%s'", $age)),
+        ]);
+    }
+
+    it('says no when nothing is parked or the retry window has not passed', function (): void {
+        expect(ixIndexer()->hasDueFailures())->toBeFalse();
+
+        ixPark(1, '23 hours');
+
+        expect(ixIndexer()->hasDueFailures())->toBeFalse();
+    });
+
+    it('says yes when a failure is past the window with attempts left', function (): void {
+        ixPark(1, '25 hours');
+
+        expect(ixIndexer()->hasDueFailures())->toBeTrue();
+    });
+
+    it('says no for a failure that used up its attempts, and agrees with what the drain requeues', function (): void {
+        ixPark(5, '25 hours');
+
+        expect(ixIndexer()->hasDueFailures())->toBeFalse();
+
+        ixPark(2, '30 hours');
+        $due = ixIndexer()->hasDueFailures();
+        ixIndexer()->drainNow();
+
+        expect($due)->toBeTrue()
+            ->and(ixIndexer()->hasDueFailures())->toBeFalse();
+    });
+});

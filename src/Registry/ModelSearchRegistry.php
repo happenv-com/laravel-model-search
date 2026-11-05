@@ -89,6 +89,18 @@ final class ModelSearchRegistry
     }
 
     /**
+     * The models that have a registered definition, in registration order. Reads only what `register()` stored:
+     * nothing is compiled and the database is not touched, so it is safe at boot (to attach model listeners, say),
+     * where `all()` and `for()` are not.
+     *
+     * @return list<class-string<Model>>
+     */
+    public function models(): array
+    {
+        return array_keys($this->definitions);
+    }
+
+    /**
      * @param  class-string<Model>  $modelClass
      */
     public function for(string $modelClass): CompiledDefinition
@@ -255,7 +267,7 @@ final class ModelSearchRegistry
                 return $field;
             }
 
-            return $field->withCompiledPath($compiler->compile($modelClass, $field->path, $field->translatable, $withScopes));
+            return $field->withCompiledPath($compiler->compile($modelClass, $field->path, $field->translatable, $withScopes, $field->each));
         }, $fields);
     }
 

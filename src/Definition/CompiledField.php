@@ -15,6 +15,7 @@ final readonly class CompiledField
 {
     /**
      * @param  list<Mode>  $modes
+     * @param  bool  $each  The column holds a list; every element is a key of the record.
      * @param  list<string>  $via  For a via field: the kinds of the related record to follow.
      * @param  (Closure(): string)|null  $label
      */
@@ -32,6 +33,7 @@ final readonly class CompiledField
         public int $weight,
         public bool $declaredByExtension,
         public ?CompiledPath $compiledPath = null,
+        public bool $each = false,
     ) {}
 
     public function withCompiledPath(CompiledPath $compiledPath): self
@@ -50,6 +52,7 @@ final readonly class CompiledField
             $this->weight,
             $this->declaredByExtension,
             $compiledPath,
+            $this->each,
         );
     }
 }

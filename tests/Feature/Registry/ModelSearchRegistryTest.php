@@ -30,6 +30,7 @@ use Happenv\ModelSearch\Tests\Fixtures\Searches\DatedRecordSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\HasManyViaOrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\MarketOrderSearchExtension;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\ProductSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\StageProbeSearch;
 use Illuminate\Support\Facades\DB;
 
@@ -327,4 +328,26 @@ it('refuses a key type a list of keys cannot narrow by', function (): void {
     $registry->register(DatedRecordSearch::class);
 
     expect(fn () => $registry->for(DatedRecord::class))->toThrow(InvalidSearchDefinition::class, 'date');
+});
+
+it('lists the registered models in registration order without compiling or touching the database', function (): void {
+    $registry = new ModelSearchRegistry;
+    $registry->register(OrderSearch::class);
+    $registry->register(ProductSearch::class);
+    $registry->register(OrderSearch::class);
+
+    config(['database.connections.pgsql.host' => '127.0.0.1', 'database.connections.pgsql.port' => 1]);
+    DB::purge('pgsql');
+
+    try {
+        expect($registry->models())->toBe([Order::class, Product::class])
+            ->and(static fn () => $registry->all())->toThrow(PDOException::class);
+    } finally {
+        config(['database.connections.pgsql.host' => env('DB_HOST', '127.0.0.1'), 'database.connections.pgsql.port' => env('DB_PORT', 55432)]);
+        DB::purge('pgsql');
+    }
+});
+
+it('answers models() through the facade', function (): void {
+    expect(ModelSearchFacade::models())->toContain(Order::class, Invoice::class);
 });

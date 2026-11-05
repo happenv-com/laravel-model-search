@@ -119,3 +119,21 @@ it('rejects a negative weight and allows zero', function (): void {
     expect(static fn () => SearchField::key('number')->weight(-1))->toThrow(InvalidSearchDefinition::class, 'negative')
         ->and(SearchField::key('number')->weight(0)->toCompiled(false)->weight)->toBe(0);
 });
+
+it('marks a key field as holding a list with each()', function (): void {
+    expect(SearchField::key('codes')->toCompiled(false)->each)->toBeFalse()
+        ->and(SearchField::key('codes')->each()->toCompiled(false)->each)->toBeTrue();
+});
+
+it('refuses each() on a name field', function (): void {
+    SearchField::name('names')->each();
+})->throws(InvalidSearchDefinition::class, 'only available on key fields');
+
+it('refuses each() on a via field', function (): void {
+    SearchField::via('order')->each();
+})->throws(InvalidSearchDefinition::class, 'only available on key fields');
+
+it('refuses each() together with exactOnSource(), in either order', function (): void {
+    expect(static fn () => SearchField::key('codes')->each()->exactOnSource())->toThrow(InvalidSearchDefinition::class, 'exactOnSource')
+        ->and(static fn () => SearchField::key('codes')->exactOnSource()->each())->toThrow(InvalidSearchDefinition::class, 'exactOnSource');
+});

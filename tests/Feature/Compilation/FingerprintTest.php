@@ -12,6 +12,7 @@ use Happenv\ModelSearch\Exceptions\InvalidStageConstraint;
 use Happenv\ModelSearch\Normalization\Normalizer;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Happenv\ModelSearch\Tests\Fixtures\Enums\OrderState;
+use Happenv\ModelSearch\Tests\Fixtures\Models\Invoice;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Scopes\NamedAddressScope;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
@@ -160,4 +161,13 @@ it('canonicalises the bindings of a listed scope', function (): void {
     );
 
     expect(Fingerprint::of($definition()))->toBe(Fingerprint::of($definition()));
+});
+
+it('keeps the fingerprint of definitions installed by v0.1.0', function (): void {
+    // Computed on v0.1.0, before each() existed: a release that changes it re-fingerprints every installed
+    // definition, and migrations then fail with InstallRefused until each one gets a version bump.
+    $registry = app(ModelSearchRegistry::class);
+
+    expect(Fingerprint::of($registry->for(Order::class)))->toBe('c705f2b4a37a0faa612b38180d3d675bf5c59b54965f377eea0d31823cf299c0')
+        ->and(Fingerprint::of($registry->for(Invoice::class)))->toBe('3cad33a070e5e6484408d641de5d4d14f230587dcbdfec379b901dd7449ff23a');
 });

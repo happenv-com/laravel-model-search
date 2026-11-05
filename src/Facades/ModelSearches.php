@@ -6,11 +6,13 @@ namespace Happenv\ModelSearch\Facades;
 
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Facade;
 
 /**
  * @method static void register(string $definition)
  * @method static void extend(string $extension)
+ * @method static list<class-string<Model>> models()
  * @method static CompiledDefinition for(string $modelClass)
  * @method static array<string, CompiledDefinition> all()
  * @method static bool isReady(string $modelClass)

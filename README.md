@@ -84,6 +84,8 @@ ModelSearches::extend(MarketOrderSearchExtension::class);
 
 If you use `laravel-true-modular`, the `Happenv\ModelSearch\Integration\TrueModular\RegistersModelSearches` provider trait offers `hasModelSearches([...])` / `hasModelSearchExtensions([...])`; call `processModelSearches()` from the provider's `moduleInitialized()` hook, or nothing is registered. **Experimental:** this two-step registration may change before 1.0.
 
+`ModelSearches::models()` lists the model classes of the registered definitions, in registration order. It reads only what `register()` stored (nothing is compiled, no database is touched), so it is safe at boot, for instance to attach model listeners, once the definitions are registered (a list asked for before a provider registers its definitions is partial); `all()` and `for()` compile and read the catalog and are not.
+
 The facade also answers two questions about the index of a model: `ModelSearches::isReady(Order::class)` (the index has been built completely at least once, so searches are served from it) and `ModelSearches::isRebuilding(Order::class)` (a rebuild is pending: right after installing, or after a definition changed). Both are cached for a few seconds per connection and database. Under the `database` driver there is no index: `isReady()` is `true` and `isRebuilding()` `false` without touching the schema. `ModelSearches::for()` and `all()` return `CompiledDefinition`, an `@internal` type that may change in any 0.x release.
 
 ### Fields
@@ -99,8 +101,13 @@ The facade also answers two questions about the index of a model: `ModelSearches
 - `matches(Mode ...)` narrows (or, for keys, adds `Infix`) the modes. **`Infix` works only in the `database` driver**: the `postgres` driver has no index for it and ignores it, so a key field declared for `Infix` alone never matches there (the doctor reports it). A name field's `Prefix` is what makes its words searchable; `Fuzzy` is read only by `similar()`.
 - `label(Closure(): string)`: labels are closures, so they resolve in the viewer's locale, not at boot.
 - `exactOnSource()`: also reads the model's own column for exact matches, so a record created a second ago is found by its exact number before the index has seen it. Only on own-table keys that match `Exact`.
+- `each()` (key fields): the column holds a **list** (a json or jsonb array, or a PostgreSQL array), and every non-empty element is a key of the record of its own, with the kind, modes, weight and reveal rule of the field. A record with the codes `AAA-111`, `BBB-222` and `CCC-333` is found by any of them, whole (`Exact`), by its start or by its end. In a json or jsonb list, strings and numbers are indexed (a number as its text) and nulls, booleans, objects and nested lists are ignored; in a native array every non-null element is indexed as its text. Elements that normalise to nothing are dropped, and an empty list or `null` gives no keys. At most `each.max_per_record` elements (default 50) of each list, that is of each source row, are read, the first ones in array order, silently: elements beyond the cap are not indexed and the doctor does not report them (a record reached through a one-to-many relation has one list per related row). A column that is not a list, a `translatable()` field and a `name()` or `via()` field refuse `each()`; so does `exactOnSource()`, because the source column can only be compared with the phrase as a whole, so a list is read from the index only. The path may run through relations, and a change of the list is captured by the same triggers as any other watched column. The `database` driver expands the list at query time, so it answers `Exact`, `Prefix` and `Suffix` over every element too (by a scan).
 - `normalizeUsing(Normalizer)`: your own normalization for the stored and the searched form.
 - `translatable()`, `weight(int)`, `revealUsing(Closure(record, viewer): bool)`: see [Results](#results).
+
+#### Relations registered at runtime
+
+A path (and a `via` field) may follow a relation that the model does not declare as a method but that was registered with `Model::resolveRelationUsing()`, as modular applications do when a package adds a relation to a model it does not own. The rule is one for the compiler and both drivers: a name is a relation if it is a method of the model that declares a `Relation` return type, or if the model (or a parent class) has a relation resolver registered for it; a declared method wins over a resolver of the same name. Whatever the resolver returns must be a relation, `MorphTo` and morph many-to-many relations stay refused, and the relation has to be registered before the definition is first compiled (so, in a service provider's `boot()`).
 
 Definition options: `sortAt()` (tie-break column), `partition()` (column that partitions the index, falling back to `partition_column`; then every search must call `->partition($value)`), `withScopes()` (global scopes, besides soft deletes, that still apply while paths are indexed), `fallback()` and `version()`.
 
@@ -301,7 +308,7 @@ The package keeps the triggers and indexes in step with your definitions and is 
 Every definition has a fingerprint (its fields, paths, stage constraint and name-word settings) and `ModelSearch::version()`.
 
 - A release applies and rebuilds **only the types whose definition it owns**: a type installed by a newer version, or by another release with a different fingerprint at the same version, is left alone. The older release, running `migrate` during a deploy, logs a warning instead of failing the deploy.
-- **Every change to a definition requires a higher `version()`**: its fields (including the order they are declared in: name words are capped per record in that order), modes, stages, normalizers or relations, and also `name_words.*`, `partition_column` and `sortAt()`. Without the bump `migrate` fails with `InstallRefused` ("different fingerprint"), the doctor reports `fingerprint-differs`, and the type keeps serving from its old projection.
+- **Every change to a definition requires a higher `version()`**: its fields (including the order they are declared in: name words are capped per record in that order), modes, stages, normalizers or relations, and also `name_words.*`, `each.max_per_record`, `partition_column` and `sortAt()`. Without the bump `migrate` fails with `InstallRefused` ("different fingerprint"), the doctor reports `fingerprint-differs`, and the type keeps serving from its old projection.
 - Change a definition's **behaviour** in a way the fingerprint cannot see (a custom normalizer, a `revealUsing` that changes what is indexed) and you must **bump `version()`** to force a rebuild.
 - **Rolling back to an older release requires a version bump too:** a revert would otherwise present an older version than the one installed and be refused. Bump it above the one you are reverting from.
 - A changed definition rebuilds the type in the background from its source tables. Searches keep using the existing index meanwhile and report `indexBuilding`, as described in [While an index is building](#while-an-index-is-building).
@@ -312,7 +319,7 @@ Sync, drain and doctor run on the **default connection**. A host with several da
 
 ## Public API
 
-Everything marked `@internal` (the compiler, the SQL builders, the drivers, the schema and indexing helpers, the normalization helpers) may change in any 0.x release. That includes `DriverManager::extend()` and the `Driver` interface: a custom driver needs internal accessors of `SearchQuery`. Public: the definition classes, the registry and its facade, `SearchQuery`, the results, the exceptions, the events, the contracts, the commands, the jobs, `Normalizer`, `SearchIndexer`, `IndexState` and `DrainStats`. Every exception implements `Happenv\ModelSearch\Exceptions\ModelSearchException`; `UnsupportedQuery` (a query nothing can answer) is a runtime refusal, not a definition error.
+Everything marked `@internal` (the compiler, the SQL builders, the drivers, the schema and indexing helpers, the normalization helpers) may change in any 0.x release. That includes `DriverManager::extend()` and the `Driver` interface: a custom driver needs internal accessors of `SearchQuery`. Public: the definition classes, the registry and its facade (`models()` among them), `SearchIndexer::hasDueFailures()` (a parked failure is due for its automatic retry; one `EXISTS`, with no compilation, to tell whether an otherwise idle drain has work; like `lag()` it needs the package's tables), `SearchQuery`, the results, the exceptions, the events, the contracts, the commands, the jobs, `Normalizer`, `SearchIndexer`, `IndexState` and `DrainStats`. Every exception implements `Happenv\ModelSearch\Exceptions\ModelSearchException`; `UnsupportedQuery` (a query nothing can answer) is a runtime refusal, not a definition error.
 
 ## Privacy
 
@@ -336,6 +343,7 @@ A search phrase is personal data: it is typed by a person and may be a name, an 
 - `only()` with a strict subset of the name fields is not supported.
 - Full-text matching on long text (`SearchField::text()`) is not implemented.
 - One `BelongsTo` hop for `via`, at most 50 parents per path: `apply()` throws `SearchTooBroad` beyond that, `get()` follows the first 50.
+- With `each()` a `Prefix` page can come back shorter than the limit: the second round keeps at most 5 key rows per record and branch, so a record whose elements all match the phrase uses up several of them.
 - The `database` driver has no typo tolerance and scans the source tables.
 
 ## Licence
