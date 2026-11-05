@@ -2,12 +2,15 @@
 
 declare(strict_types=1);
 
+use ArrayObject;
+use Closure;
 use Happenv\ModelSearch\Definition\SearchField;
 use Happenv\ModelSearch\Postgres\Query\CandidateRow;
 use Happenv\ModelSearch\Postgres\Query\RoundPlan;
 use Happenv\ModelSearch\Postgres\Query\RoundTwo;
 use Happenv\ModelSearch\Postgres\Query\RoundTwoPhase;
 use Happenv\ModelSearch\Postgres\Query\TypeRound;
+use Happenv\ModelSearch\Postgres\Session\SearchSession;
 use Happenv\ModelSearch\Query\SearchQuery;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Invoice;
@@ -136,15 +139,29 @@ describe('the cases that need a second round', function (): void {
             Order::create(['signature' => sprintf('ABC-%02d', $i), 'external_number' => 'mine']);
         }
         msIndex();
-        config(['model-search.search.timeout_ms' => 700]);
-        // Round one asks the host about a handful of candidates (about 0.25 s), round two about every key it scans (over 1 s).
+        // Independent of the speed of the runner: round one gets a timeout it cannot miss, every later statement one
+        // that a single host row (it sleeps 50 ms) always exceeds. Which statement is which is counted, not timed.
+        config(['model-search.search.timeout_ms' => 60000]);
+        $session = resolve(SearchSession::class);
+        $calls = new ArrayObject(['n' => 0]);
+        app()->bind(SearchSession::class, static fn (): object => new class($session, $calls)
+        {
+            /** @param  ArrayObject<string, int>  $calls */
+            public function __construct(private readonly SearchSession $session, private readonly ArrayObject $calls) {}
+
+            public function run(string $hostConnection, int $timeoutMs, Closure $fn): mixed
+            {
+                return $this->session->run($hostConnection, ++$this->calls['n'] === 1 ? $timeoutMs : 10, $fn);
+            }
+        });
         $slow = Order::query()->where('external_number', 'mine')->whereRaw('pg_sleep(0.05) is not null');
 
         $results = OrderSearch::query('ABC')->within($slow)->withoutStages()->get();
 
-        expect($results->timedOut)->toBeTrue()
+        expect($calls['n'])->toBeGreaterThanOrEqual(2)
+            ->and($results->timedOut)->toBeTrue()
             ->and(count($results))->toBeGreaterThan(0);
-    })->group('slow');
+    });
 
     it('keeps the phrase off the host connection in round two as well', function (): void {
         foreach (range(1, 6) as $i) {
