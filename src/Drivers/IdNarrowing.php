@@ -15,7 +15,8 @@ use Illuminate\Database\Eloquent\Model;
  *
  * The keys travel as ONE array parameter and join the table through `JOIN unnest(…)`, so a top-level
  * `orWhere` of the table query cannot widen the result, and an empty list yields no rows. The lookup
- * that produced the keys is capped by `apply.max_ids`.
+ * that produced the keys is capped by `apply.max_ids`. The cap counts rows per branch, not distinct
+ * records, and hits outside the viewer's scope count toward it (R22).
  *
  * @internal
  */

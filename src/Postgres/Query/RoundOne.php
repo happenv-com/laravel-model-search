@@ -46,6 +46,7 @@ final class RoundOne
     public static function sql(array $targets): ?array
     {
         $branches = [];
+        $withs = [];
         $pools = [];
         $types = [];
         $position = 0;
@@ -53,6 +54,24 @@ final class RoundOne
         foreach ($targets as $alias => $target) {
             $plan = $target['plan'] ?? RoundPlan::first();
             $own = CandidateBranches::for($target['definition'], $target['query'], $plan->pool, $position, $plan->scoped, $plan->variants);
+
+            if ($plan->gated && $own !== []) {
+                // The first stage, scoped, in a CTE of its own; the other stages run only when it holds no non-exact hit.
+                $gate = CandidateBranches::for($target['definition'], $target['query'], $plan->pool, $position, $plan->scoped, [CandidateBranches::ALL_STAGES], onlyStaged: true, firstBranch: count($own));
+                $name = 's0t'.$position;
+                $first = Fragment::join($own, ' UNION ALL ');
+                $withs[] = new Fragment(sprintf('%s AS MATERIALIZED (%s)', $name, $first->sql), $first->bindings);
+                $own = [new Fragment(sprintf('(SELECT * FROM %s)', $name))];
+
+                if ($gate !== []) {
+                    $rest = Fragment::join($gate, ' UNION ALL ');
+                    $own[] = new Fragment(
+                        sprintf('(SELECT g.* FROM (%s) g WHERE NOT EXISTS (SELECT 1 FROM %s x WHERE x.level %% %d > 0 AND x.s0))', $rest->sql, $name, Hit::VIA_OFFSET),
+                        $rest->bindings,
+                    );
+                }
+            }
+
             array_push($branches, ...$own);
             $pools[$position] = $plan->pool;
             $types[$position] = [
@@ -71,6 +90,7 @@ final class RoundOne
         }
 
         $candidates = Fragment::join($branches, ' UNION ALL ');
+        $ctes = $withs === [] ? new Fragment('') : Fragment::join($withs, ', ');
         $weights = self::weights($types);
         $entries = TableNames::forConnection(Sql::connectionName(new ($types[0]['definition']->modelClass)))->quoted(TableNames::forConnection(Sql::connectionName(new ($types[0]['definition']->modelClass)))->entries());
 
@@ -103,7 +123,7 @@ final class RoundOne
 
         $sql = sprintf(
             <<<'SQL'
-WITH cand AS MATERIALIZED (
+WITH %11$s cand AS MATERIALIZED (
   SELECT u.*, %1$s AS w, count(*) OVER (PARTITION BY u.br) > %2$s AS is_full
   FROM (%3$s) AS u
 ),
@@ -155,11 +175,12 @@ SQL,
             implode(' UNION ALL ', $authorized),
             Hit::VIA_OFFSET,
             $entries,
+            $ctes->sql === '' ? '' : $ctes->sql.',',
         );
 
         return [
             'sql' => $sql,
-            'bindings' => [...$weights->bindings, ...$candidates->bindings, ...$valueBindings, ...$authorizedBindings],
+            'bindings' => [...$ctes->bindings, ...$weights->bindings, ...$candidates->bindings, ...$valueBindings, ...$authorizedBindings],
         ];
     }
 

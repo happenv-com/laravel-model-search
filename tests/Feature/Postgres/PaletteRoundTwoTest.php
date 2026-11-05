@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Happenv\ModelSearch\Definition\SearchField;
+use Happenv\ModelSearch\Postgres\Query\CandidateRow;
 use Happenv\ModelSearch\Postgres\Query\RoundPlan;
 use Happenv\ModelSearch\Postgres\Query\RoundTwo;
 use Happenv\ModelSearch\Postgres\Query\RoundTwoPhase;
@@ -50,7 +51,7 @@ describe('the cases that need a second round', function (): void {
             ->and(msIndexStatements($recorder))->toHaveCount(2);
     });
 
-    it('goes on to the scoped all-stages branches when the scoped stage zero is empty too', function (): void {
+    it('reads the scoped all-stages branches in the same statement when the scoped stage zero is empty too', function (): void {
         foreach (range(1, 8) as $i) {
             Order::create(['signature' => 'ABC-'.$i, 'state' => 'unshipped', 'external_number' => 'theirs']);
         }
@@ -63,7 +64,7 @@ describe('the cases that need a second round', function (): void {
         expect(msSignatures($results))->toBe(['ABC-SHIPPED'])
             ->and($results->stage)->toBe('all')
             ->and(iterator_to_array($results)[0]->match->stage)->toBe('all')
-            ->and(msIndexStatements($recorder))->toHaveCount(3);
+            ->and(msIndexStatements($recorder))->toHaveCount(2);
     });
 
     it('underfilled and truncated type is completed in round two', function (): void {
@@ -135,15 +136,15 @@ describe('the cases that need a second round', function (): void {
             Order::create(['signature' => sprintf('ABC-%02d', $i), 'external_number' => 'mine']);
         }
         msIndex();
-        config(['model-search.search.timeout_ms' => 400]);
-        // Round one asks the host about a handful of candidates, round two about every key it scans.
-        $slow = Order::query()->where('external_number', 'mine')->whereRaw('pg_sleep(0.03) is not null');
+        config(['model-search.search.timeout_ms' => 700]);
+        // Round one asks the host about a handful of candidates (about 0.25 s), round two about every key it scans (over 1 s).
+        $slow = Order::query()->where('external_number', 'mine')->whereRaw('pg_sleep(0.05) is not null');
 
         $results = OrderSearch::query('ABC')->within($slow)->withoutStages()->get();
 
         expect($results->timedOut)->toBeTrue()
             ->and(count($results))->toBeGreaterThan(0);
-    });
+    })->group('slow');
 
     it('keeps the phrase off the host connection in round two as well', function (): void {
         foreach (range(1, 6) as $i) {
@@ -182,10 +183,11 @@ describe('the decision', function (): void {
         $targets = rtTarget();
         $plain = rtTarget('ABC', withoutStages: true);
 
-        expect(RoundTwo::phases($targets, ['order' => rtRound(0, 0, true, true, false, false)]))->toBe(['order' => RoundTwoPhase::StageZero])
+        expect(RoundTwo::phases($targets, ['order' => rtRound(0, 0, true, true, false, false)]))->toBe(['order' => RoundTwoPhase::StageZeroThenAll])
             ->and(RoundTwo::phases($targets, ['order' => rtRound(0, 0, false, false, true, false)]))->toBe(['order' => RoundTwoPhase::AllStages])
             ->and(RoundTwo::phases($targets, ['order' => rtRound(2, 2, false, true, false, false)]))->toBe(['order' => RoundTwoPhase::StageZero])
-            ->and(RoundTwo::phases($targets, ['order' => rtRound(0, 0, false, false, false, true)]))->toBe(['order' => RoundTwoPhase::AllStages])
+            ->and(RoundTwo::phases($targets, ['order' => rtRound(0, 0, false, false, false, true)]))->toBe([])
+            ->and(RoundTwo::phases($targets, ['order' => rtRound(0, 0, false, true, false, true)]))->toBe(['order' => RoundTwoPhase::AllStages])
             ->and(RoundTwo::phases($plain, ['order' => rtRound(0, 0, false, true, false, false)]))->toBe(['order' => RoundTwoPhase::Unstaged])
             ->and(RoundTwo::phases($targets, ['order' => rtRound(0, 0, false, false, false, false)]))->toBe([])
             ->and(RoundTwo::phases($targets, ['order' => rtRound(5, 0, true, true, true, true)]))->toBe([]);
@@ -199,6 +201,27 @@ describe('the decision', function (): void {
             ->and($sql(RoundTwoPhase::AllStages))->not->toContain('AND k.stage < 32767')
             ->and($sql(RoundTwoPhase::StageZero))->toContain('JOIN LATERAL (SELECT 1 FROM (')
             ->and($sql(RoundTwoPhase::StageZero))->not->toContain('WHERE EXISTS (SELECT 1 FROM (');
+    });
+
+    it('gates the all-stages branches on the first stage inside the one statement', function (): void {
+        $sql = RoundTwo::sql(rtTarget(), ['order' => RoundTwoPhase::StageZeroThenAll])['sql'];
+
+        expect($sql)->toContain('s0t0 AS MATERIALIZED (')
+            ->and($sql)->toContain('NOT EXISTS (SELECT 1 FROM s0t0 x WHERE x.level % 10 > 0 AND x.s0)')
+            ->and(substr_count($sql, 'AND k.stage < 32767'))->toBeGreaterThan(0);
+    });
+
+    it('merges what round two found with what round one found', function (): void {
+        $row = static fn (string $id, int $level): CandidateRow => new CandidateRow($id, 'signature', $level, null, null, false);
+        $first = new TypeRound([$row('a', 0), $row('b', 1)], 2, 0, false, false, false, false, 3);
+        $second = new TypeRound([$row('b', 0), $row('c', 2)], 2, 0, false, true, false, false, 3);
+
+        $merged = $second->mergedWith($first);
+
+        expect(array_map(static fn ($r): string => $r->subjectId.$r->level, $merged->rows))->toBe(['b0', 'a0', 'c2'])
+            ->and($merged->anyFull)->toBeTrue()
+            ->and($second->mergedWith(new TypeRound([], 0, 0, false, false, false, false, 3))->rows)->toHaveCount(2)
+            ->and((new TypeRound([], 0, 0, false, false, false, false, 3))->mergedWith($first)->rows)->toHaveCount(2);
     });
 
     it('limits every scoped branch to a few keys per record of the limit', function (): void {

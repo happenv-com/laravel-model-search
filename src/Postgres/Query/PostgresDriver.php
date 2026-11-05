@@ -44,7 +44,7 @@ use Illuminate\Support\Collection;
  * records on the search connection ({@see ApplyIds}) and hands them to the table query; `similar()`
  * is one `Fuzzy` statement over the names ({@see SimilarQuery}). A type whose index is not ready is
  * answered the same way for all three (the source tables, or only its `exactOnSource` fields).
- * `candidates()` is still served by the {@see DatabaseDriver}.
+ * `candidates()` reads the raw rows of round one from the index ({@see CandidateRows}).
  *
  * The viewer's rate limit is charged once per call, before its first statement.
  */
@@ -214,13 +214,32 @@ final readonly class PostgresDriver implements Driver
     #[\Override]
     public function candidates(SearchQuery $query): Collection
     {
-        if (! $this->isReady($this->definition) && ! $this->definition->fallback) {
+        NameFieldSelection::assertWhole($this->definition, $query->onlyKinds());
+
+        if (! $this->isReady($this->definition)) {
+            if ($this->definition->fallback) {
+                return new DatabaseDriver($this->definition)->candidates($query);
+            }
+
             $kinds = $this->sourceKinds($query, $this->definition);
 
             return $kinds === null ? new Collection : new DatabaseDriver($this->definition)->candidates($query->only($kinds)->using(Mode::Exact));
         }
 
-        return new DatabaseDriver($this->definition)->candidates($query);
+        $statement = CandidateRows::sql($this->definition, $query);
+
+        if ($statement === null) {
+            return new Collection;
+        }
+
+        $query->charge();
+        $rows = resolve(SearchSession::class)->run(
+            Sql::connectionName(new ($this->definition->modelClass)),
+            $this->timeout('search', 300),
+            static fn (Connection $db): array => array_values($db->select($statement['sql'], $statement['bindings'])),
+        );
+
+        return CandidateRows::read($this->definition, $query, $rows);
     }
 
     /**
@@ -278,58 +297,45 @@ final readonly class PostgresDriver implements Driver
     }
 
     /**
-     * Round two for the types round one could not settle: one statement for all of them, and a further
-     * one for the types with stages whose scoped first stage found nothing besides exact hits. A type
-     * whose statement ran out of time keeps what the earlier round found and is reported as timed out.
+     * Round two for the types round one could not settle: ONE statement for all of them. What it
+     * finds is merged with what round one found. A type whose statement ran out of time keeps what
+     * round one found and is reported as timed out.
      *
      * @param  array<string, array{definition: CompiledDefinition, query: SearchQuery, host: HostQuery}>  $targets
-     * @param  array<string, TypeRound>  $rounds  Replaced, type by type, by what round two found.
+     * @param  array<string, TypeRound>  $rounds  Replaced, type by type, by the merge with round two.
      * @param  array<string, true>  $timedOut
      */
     private function completed(string $connection, array $targets, array &$rounds, array &$timedOut): void
     {
         $pending = RoundTwo::phases($targets, $rounds);
+        $statement = $pending === [] ? null : RoundTwo::sql($targets, $pending);
 
-        while ($pending !== []) {
-            $statement = RoundTwo::sql($targets, $pending);
+        if ($statement === null) {
+            return;
+        }
 
-            if ($statement === null) {
-                return;
-            }
-
-            try {
-                $rows = resolve(SearchSession::class)->run(
-                    $connection,
-                    $this->timeout('search', 300),
-                    static fn (Connection $db): array => array_values($db->select($statement['sql'], $statement['bindings'])),
-                );
-            } catch (SearchTimedOut) {
-                foreach (array_keys($pending) as $alias) {
-                    $timedOut[$alias] = true;
-                }
-
-                return;
-            }
-
-            $limits = [];
-
+        try {
+            $rows = resolve(SearchSession::class)->run(
+                $connection,
+                $this->timeout('search', 300),
+                static fn (Connection $db): array => array_values($db->select($statement['sql'], $statement['bindings'])),
+            );
+        } catch (SearchTimedOut) {
             foreach (array_keys($pending) as $alias) {
-                $limits[$alias] = $targets[$alias]['query']->maxResults();
+                $timedOut[$alias] = true;
             }
 
-            $read = RoundOne::read($rows, array_keys($pending), $limits);
-            $next = [];
+            return;
+        }
 
-            foreach ($pending as $alias => $phase) {
-                $rounds[$alias] = $read[$alias];
+        $limits = [];
 
-                // The scoped first stage held nothing besides exact hits: the type may now read every stage.
-                if ($phase === RoundTwoPhase::StageZero && ! $read[$alias]->answeredByStageZero()) {
-                    $next[$alias] = RoundTwoPhase::AllStages;
-                }
-            }
+        foreach (array_keys($pending) as $alias) {
+            $limits[$alias] = $targets[$alias]['query']->maxResults();
+        }
 
-            $pending = $next;
+        foreach (RoundOne::read($rows, array_keys($pending), $limits) as $alias => $found) {
+            $rounds[$alias] = $found->mergedWith($rounds[$alias]);
         }
     }
 

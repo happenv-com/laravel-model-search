@@ -28,6 +28,10 @@ use Happenv\ModelSearch\Query\SearchQuery;
  * key, ranked by the best similarity, then by `sortAt`, and cut at the limit AFTER the scope. Every stage is
  * read: the entry's stage only tells which stage a record belongs to.
  *
+ * It matches ALL the normalized names in `entries.names`, including those of name fields that did not
+ * declare `Fuzzy` (the column does not record which field a name came from; the same root as the
+ * refusal of a strict subset of the name fields).
+ *
  * The value of a match is the name behind the most similar name word of the record, so it is
  * revealed under the rule of the name words (every name field must allow it). A definition without
  * name words (no name field that matches by prefix) reports the match without a value.

@@ -24,7 +24,12 @@ use Happenv\ModelSearch\Query\SearchQuery;
  *
  * The scope of the viewer is not applied (the table query applies its own). Every branch is cut at
  * `apply.max_ids + 1` rows, and a branch that reaches it, or a union of more than `max_ids` records,
- * is too broad: {@see SearchTooBroad}.
+ * is too broad: {@see SearchTooBroad}. So is a `via` path that found more parents in the parent's
+ * scope than its cap of 50: a list that left out records would be a silently partial table.
+ *
+ * The cap counts ROWS per branch, not distinct records (a record with several keys of one branch
+ * uses several rows), and hits outside the viewer's scope count toward it too: a wide phrase can be
+ * too broad for a viewer who has few records in it. Known narrowing of v1 (R22).
  *
  * @internal
  */
@@ -44,9 +49,10 @@ final class ApplyIds
 
         $union = Fragment::join($branches, ' UNION ALL ');
 
+        // One row says whether the list is too broad (a branch at its cap, or a `via` path with more parents than its cap), the others are the keys.
         return [
             'sql' => sprintf(
-                'WITH u AS MATERIALIZED (SELECT x.subject_id, x.br FROM (%1$s) AS x WHERE x.subject_id IS NOT NULL), b AS (SELECT count(*) AS n FROM (SELECT br FROM u GROUP BY br HAVING count(*) > %2$d) AS g) SELECT DISTINCT u.subject_id, (SELECT n FROM b) AS broad FROM u LIMIT %3$d',
+                'WITH u AS MATERIALIZED (SELECT x.subject_id, x.br, x.ptr FROM (%1$s) AS x) SELECT CAST(NULL AS text) AS subject_id, (SELECT count(*) FROM (SELECT br FROM u GROUP BY br HAVING count(*) > %2$d) AS g) + (SELECT count(*) FROM u WHERE ptr) AS broad UNION ALL (SELECT DISTINCT u.subject_id, 0 FROM u WHERE u.subject_id IS NOT NULL LIMIT %3$d)',
                 $union->sql,
                 $max,
                 $max + 1,

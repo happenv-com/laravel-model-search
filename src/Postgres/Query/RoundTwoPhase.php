@@ -14,6 +14,12 @@ enum RoundTwoPhase
     /** A type with stages: the branches of the first stage. */
     case StageZero;
 
+    /**
+     * A type with stages whose first stage came out empty after the scope: its first-stage branches and, in the SAME
+     * statement, behind an uncorrelated `NOT EXISTS` over them, the branches of every other stage.
+     */
+    case StageZeroThenAll;
+
     /** A type with stages: the branches of every stage. */
     case AllStages;
 
@@ -28,7 +34,7 @@ enum RoundTwoPhase
     public function variants(): ?array
     {
         return match ($this) {
-            self::StageZero => [CandidateBranches::STAGE_ZERO],
+            self::StageZero, self::StageZeroThenAll => [CandidateBranches::STAGE_ZERO],
             self::AllStages => [CandidateBranches::ALL_STAGES],
             self::Unstaged => null,
         };

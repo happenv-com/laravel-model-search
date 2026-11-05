@@ -207,6 +207,24 @@ describe('via', function (): void {
     });
 });
 
+describe('via overflow', function (): void {
+    it('refuses a via path with more parents than its cap instead of returning a cut list, on both drivers', function (): void {
+        foreach (range(1, 60) as $i) {
+            $order = Order::create(['signature' => sprintf('ORDS-%02d', $i)]);
+            Invoice::create(['number' => 'FV-'.$i, 'order_id' => $order->id]);
+        }
+        msIndex();
+        $fifty = Order::query()->where('signature', '<=', 'ORDS-50');
+
+        foreach (['postgres', 'database'] as $driver) {
+            config(['model-search.driver' => $driver]);
+
+            expect(fn () => apInvoices('ORDS', Order::query()), $driver)->toThrow(SearchTooBroad::class)
+                ->and(apInvoices('ORDS', $fifty)->count(), $driver)->toBe(50);
+        }
+    });
+});
+
 describe('too broad', function (): void {
     it('apply beyond max ids throws SearchTooBroad', function (): void {
         config(['model-search.apply.max_ids' => 3]);

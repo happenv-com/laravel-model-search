@@ -18,16 +18,22 @@ use Happenv\ModelSearch\Query\SearchQuery;
  * after the records in scope and the wait is bounded by the statement timeout, never by a pool.
  *
  * - A type with stages whose first stage came out empty after the scope although a branch of the
- *   first stage ran into the end of its pool: its stage-zero branches, scoped. Only when they find
- *   nothing besides exact hits either, a further statement reads its all-stages branches, scoped.
- *   The type does NOT fall to "all stages" on the word of a pool that the scope may have emptied.
+ *   first stage ran into the end of its pool: its stage-zero branches, scoped, in a CTE; the
+ *   all-stages branches, scoped too, sit in the SAME statement behind an uncorrelated `NOT EXISTS`
+ *   over that CTE, so they are read only when the first stage holds no non-exact hit. The type does
+ *   NOT fall to "all stages" on the word of a pool that the scope may have emptied.
  * - A type that came out short ({@see TypeRound::underfilled()}) while a branch ran into the end
- *   of its pool, or a via path found more parents than it follows: the same branches, scoped, for
- *   the stage that answered (the first stage when it did, all stages otherwise).
+ *   of its pool: the same branches, scoped, for the stage that answered (the first stage when it
+ *   did, all stages otherwise). A `via` path that found more parents than its cap of 50 does not
+ *   start round two: the cap is the contract (P§8.2) and scoping the children cannot lift it.
  *
  * A branch is as long as the keys the best `limit` records can own ({@see self::KEYS_PER_RECORD}
- * per record): a record with several keys of one branch uses several rows of it. A record owning
- * more keys than that of one branch can still leave the type short; this is the bound of the round.
+ * per record): a record with several keys of one branch uses several rows of it. Deduplicating per
+ * record inside a branch would need a sort and lose the early stop of the index order, so a record
+ * owning more keys than that of one branch can still leave the type short. Seam (P5): a loose index
+ * scan, if more than five keys per record and branch ever matters.
+ *
+ * What round two finds is MERGED with what round one found ({@see TypeRound::mergedWith()}).
  *
  * Round two never starts after a timeout of round one. Its flags are not read: nothing follows it.
  *
@@ -59,8 +65,8 @@ final class RoundTwo
             $staged = CandidateBranches::isStaged($target['definition'], $target['query']);
 
             if ($staged && ! $round->answeredByStageZero() && $round->stageZeroTruncated()) {
-                $phases[$alias] = RoundTwoPhase::StageZero;
-            } elseif ($round->truncated() || $round->viaPoolFull) {
+                $phases[$alias] = RoundTwoPhase::StageZeroThenAll;
+            } elseif ($round->truncated()) {
                 $phases[$alias] = match (true) {
                     ! $staged => RoundTwoPhase::Unstaged,
                     $round->answeredByStageZero() => RoundTwoPhase::StageZero,

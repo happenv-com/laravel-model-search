@@ -90,8 +90,6 @@ final class CandidateBranches
 
     private const int MIN_SUFFIX = 4;
 
-    private int $counter = 0;
-
     private readonly Model $model;
 
     private readonly string $keys;
@@ -109,6 +107,8 @@ final class CandidateBranches
         private readonly bool $scoped,
         private readonly ?array $variants,
         private readonly bool $table,
+        private readonly bool $onlyStaged,
+        private int $counter,
     ) {
         $this->model = new ($definition->modelClass);
         $this->keys = TableNames::forConnection(Sql::connectionName($this->model))->quoted(TableNames::forConnection(Sql::connectionName($this->model))->keys());
@@ -119,11 +119,13 @@ final class CandidateBranches
      * @param  bool  $scoped  Round two: the scope of the host is applied inside each branch, before its limit.
      * @param  list<int>|null  $variants  Round two: which stage variants of a type with stages to read ({@see self::STAGE_ZERO}, {@see self::ALL_STAGES}); null reads both.
      * @param  bool  $table  `apply()`: no stages, no scope of the host, prefixes from four characters, and the source column read without the host.
+     * @param  bool  $onlyStaged  Only the branches that have stage variants (not `Exact`, the source or `via`).
+     * @param  int  $firstBranch  Where the ids of the branches start counting, to keep them unique when a type is built in two parts.
      * @return list<Fragment> Each already wrapped in parentheses.
      */
-    public static function for(CompiledDefinition $definition, SearchQuery $query, int $pool, int $typeIndex = 0, bool $scoped = false, ?array $variants = null, bool $table = false): array
+    public static function for(CompiledDefinition $definition, SearchQuery $query, int $pool, int $typeIndex = 0, bool $scoped = false, ?array $variants = null, bool $table = false, bool $onlyStaged = false, int $firstBranch = 0): array
     {
-        return new self($definition, $query, $pool, $typeIndex, $scoped, $variants, $table)->build();
+        return new self($definition, $query, $pool, $typeIndex, $scoped, $variants, $table, $onlyStaged, $firstBranch)->build();
     }
 
     /**
@@ -142,6 +144,10 @@ final class CandidateBranches
         $branches = [];
 
         foreach ($this->keyPlan($this->definition, $this->query->onlyKinds()) as $item) {
+            if ($this->onlyStaged && $item['mode'] === Mode::Exact) {
+                continue;
+            }
+
             $stageVariants = $item['mode'] === Mode::Exact || ! $this->staged ? [self::PLAIN] : $this->stageVariants();
 
             foreach ($stageVariants as $variant) {
@@ -155,7 +161,7 @@ final class CandidateBranches
             }
         }
 
-        foreach ($this->definition->fields as $field) {
+        foreach ($this->onlyStaged ? [] : $this->definition->fields as $field) {
             if ($field->exactOnSource && $this->chosen($field) && $this->allows(Mode::Exact) && QueryVariants::keysFor($this->query->phraseText(), $this->query->viewerLocale()) !== []) {
                 $branch = $this->table ? $this->sourceTableBranch($field) : $this->sourceBranch($field);
 
@@ -493,7 +499,7 @@ final class CandidateBranches
         $stageBindings = $this->staged ? [$this->definition->morphAlias] : [];
         $partition = $this->query->partitionFilter();
         $authorization = $this->scoped ? $this->childAuthorization() : new Fragment('');
-        $strict = $this->scoped || $this->table;
+        $strict = $this->scoped;
 
         return new Fragment(
             sprintf(
@@ -513,8 +519,8 @@ final class CandidateBranches
                 $this->pool + 1,
                 $partition === null ? '' : sprintf(' AND ch.%s = ?', Sql::ident($partition['column'])),
                 $authorization->sql,
-                // Round one keeps a sentinel row for a pool of parents that gave no child, to carry the flag; the others have no use for it.
-                $strict ? ($this->scoped ? 'auth.ok IS NOT NULL' : sprintf('ch.%s IS NOT NULL', Sql::ident($this->model->getKeyName()))) : sprintf('ch.%s IS NOT NULL OR (pc.over AND pc.rn = 1)', Sql::ident($this->model->getKeyName())),
+                // A sentinel row for a pool of parents that gave no child carries the flag (round one, and apply, which refuses a cut list); round two has no use for it.
+                $strict ? 'auth.ok IS NOT NULL' : sprintf('ch.%s IS NOT NULL OR (pc.over AND pc.rn = 1)', Sql::ident($this->model->getKeyName())),
             ),
             [$field->kind, Sql::arrayLiteral($revealing), $field->kind, ...$union->bindings, ...($partition === null ? [] : [$partition['value']]), ...$stageBindings, ...$authorization->bindings],
         );

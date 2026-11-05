@@ -71,6 +71,9 @@ SQL;
 ' ' || regexp_replace(regexp_replace(c."value", '[''’`]+', '', 'g'), '[\s\-_.\/#+,:;]+', ' ', 'g')
 SQL;
 
+    /** The kind of the marker row a table lookup gets when a `via` path found more parents than it follows. */
+    private const string OVERFLOW_KIND = '__overflow';
+
     /** The most parents in scope a `via` field follows per search. */
     public const int VIA_PARENT_LIMIT = 50;
 
@@ -146,6 +149,12 @@ SQL;
             $query->charge();
             $rows = $this->run($this->timeout('search'), fn (Connection $db): array => $this->select($db, $this->idsSql($query, $hits)));
             $ids = array_values(array_unique(array_map(static fn (Hit $hit): string => $hit->rootId, $rows)));
+
+            // The marker row (no key): a `via` path found more parents than it follows, so the list would leave records out.
+            if (in_array('', $ids, true)) {
+                throw IdNarrowing::tooBroad();
+            }
+
             IdNarrowing::assertWithinCap($ids);
         }
 
@@ -283,18 +292,19 @@ SQL;
         $softDelete = Sql::softDeleteColumn($child);
         $key = Sql::ident(HostQuery::KEY_ALIAS);
 
-        // The best parent hits inside the parent's scope, one per parent, at most VIA_PARENT_LIMIT.
+        // The best parent hits inside the parent's scope, one per parent, at most VIA_PARENT_LIMIT. A table reads one more,
+        // which is not followed but says the list is cut: `apply()` refuses a list that would leave records out.
         $parents = sprintf(
-            'SELECT d.* FROM (SELECT DISTINCT ON (p."root_key") p.* FROM (%1$s) AS p JOIN (%2$s) AS "parent_host" ON "parent_host".%3$s = p."root_key" ORDER BY p."root_key", p."level", p."weight" DESC) AS d ORDER BY d."level", d."weight" DESC, d."root_id" LIMIT %4$d',
+            'SELECT d.*, row_number() OVER (ORDER BY d."level", d."weight" DESC, d."root_id") AS "rn" FROM (SELECT DISTINCT ON (p."root_key") p.* FROM (%1$s) AS p JOIN (%2$s) AS "parent_host" ON "parent_host".%3$s = p."root_key" ORDER BY p."root_key", p."level", p."weight" DESC) AS d ORDER BY d."level", d."weight" DESC, d."root_id" LIMIT %4$d',
             $parentHits->sql,
             $scope['sql'],
             $key,
-            self::VIA_PARENT_LIMIT,
+            self::VIA_PARENT_LIMIT + ($forTable ? 1 : 0),
         );
 
         return new Fragment(
             sprintf(
-                'SELECT c.%1$s::text AS "root_id", CAST(? AS text) AS "kind", (b."level" + %2$d) AS "level", CAST(? AS integer) AS "weight", CASE WHEN b."kind" = ANY(?::text[]) THEN NULL ELSE b."value" END AS "value", CAST(? AS text) AS "via" FROM (%3$s) AS b JOIN %4$s AS pt ON pt.%5$s = b."root_key" JOIN %6$s AS c ON c.%7$s = pt.%8$s%9$s',
+                'WITH b AS MATERIALIZED (%3$s) SELECT c.%1$s::text AS "root_id", CAST(? AS text) AS "kind", (b."level" + %2$d) AS "level", CAST(? AS integer) AS "weight", CASE WHEN b."kind" = ANY(?::text[]) THEN NULL ELSE b."value" END AS "value", CAST(? AS text) AS "via" FROM b JOIN %4$s AS pt ON pt.%5$s = b."root_key" JOIN %6$s AS c ON c.%7$s = pt.%8$s%9$s WHERE b."rn" <= %10$d%11$s',
                 Sql::ident($child->getKeyName()),
                 Hit::VIA_OFFSET,
                 $parents,
@@ -304,8 +314,10 @@ SQL;
                 Sql::ident($relation->getForeignKeyName()),
                 Sql::ident($relation->getOwnerKeyName()),
                 $softDelete === null ? '' : ' AND c.'.Sql::ident($softDelete).' IS NULL',
+                self::VIA_PARENT_LIMIT,
+                $forTable ? sprintf(' UNION ALL SELECT CAST(NULL AS text), \'%s\', 0, 0, CAST(NULL AS text), CAST(NULL AS text) WHERE EXISTS (SELECT 1 FROM b WHERE b."rn" > %d)', self::OVERFLOW_KIND, self::VIA_PARENT_LIMIT) : '',
             ),
-            [$field->kind, $field->weight, Sql::arrayLiteral($revealing), $field->kind, ...$parentHits->bindings, ...$scope['bindings']],
+            [...$parentHits->bindings, ...$scope['bindings'], $field->kind, $field->weight, Sql::arrayLiteral($revealing), $field->kind],
         );
     }
 
@@ -555,7 +567,7 @@ SQL;
 
         return new Fragment(
             sprintf(
-                'SELECT DISTINCT h."root_id" FROM (%1$s) AS h JOIN (%2$s) AS "host" ON "host".%3$s = h."root_key" JOIN %4$s AS r ON r.%5$s = h."root_key"%6$s LIMIT %7$d',
+                'WITH h AS MATERIALIZED (%1$s) (SELECT DISTINCT h."root_id" FROM h JOIN (%2$s) AS "host" ON "host".%3$s = h."root_key" JOIN %4$s AS r ON r.%5$s = h."root_key"%6$s LIMIT %7$d) UNION ALL (SELECT CAST(NULL AS text) FROM h WHERE h."kind" = \'%8$s\' LIMIT 1)',
                 $hits->sql,
                 $hostSql['sql'],
                 Sql::ident(HostQuery::KEY_ALIAS),
@@ -563,6 +575,7 @@ SQL;
                 Sql::ident($model->getKeyName()),
                 $where,
                 IdNarrowing::lookupLimit(),
+                self::OVERFLOW_KIND,
             ),
             $bindings,
         );

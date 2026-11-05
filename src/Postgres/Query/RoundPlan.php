@@ -7,7 +7,8 @@ namespace Happenv\ModelSearch\Postgres\Query;
 /**
  * How the statement reads one type: the size of the pool of each branch (a branch returns
  * `pool + 1` rows), whether the scope of the host is applied inside the branch, which stage
- * variants it reads, and whether the stage selection of round one applies.
+ * variants it reads, whether the stage selection of round one applies, and whether the other stages are
+ * read only when the first holds no non-exact hit (`$gated`, in the same statement).
  *
  * @internal
  */
@@ -21,6 +22,7 @@ final readonly class RoundPlan
         public bool $scoped = false,
         public ?array $variants = null,
         public bool $filtersStage = true,
+        public bool $gated = false,
     ) {}
 
     /**
@@ -38,6 +40,6 @@ final readonly class RoundPlan
      */
     public static function scoped(int $limit, RoundTwoPhase $phase): self
     {
-        return new self($limit * RoundTwo::KEYS_PER_RECORD - 1, true, $phase->variants(), false);
+        return new self($limit * RoundTwo::KEYS_PER_RECORD - 1, true, $phase->variants(), false, $phase === RoundTwoPhase::StageZeroThenAll);
     }
 }

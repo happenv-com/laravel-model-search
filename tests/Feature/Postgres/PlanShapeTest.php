@@ -21,6 +21,7 @@ use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\ExpectationFailedException;
 
 covers(RoundOne::class);
 
@@ -46,9 +47,33 @@ function psSeed(): void
     DB::statement("insert into model_search_keys (subject_type, subject_id, kind, key, value, stage) select 'order', id::text, 'external_number', lower(replace(external_number, '-', '')), external_number, case when state = 'unshipped' then 0 else 32767 end from orders");
     DB::statement("insert into model_search_keys (subject_type, subject_id, kind, key, value, stage) select 'order', id::text, 'name_word', 'jan', customer_name, case when state = 'unshipped' then 0 else 32767 end from orders");
     DB::statement("insert into model_search_keys (subject_type, subject_id, kind, key, value, stage) select 'order', id::text, 'name_word', lower(substr(customer_name, 5)), customer_name, case when state = 'unshipped' then 0 else 32767 end from orders");
+    // Orders whose number starts and ends alike, so that the prefix and the suffix of one phrase both match thousands of keys, each with an invoice.
+    DB::statement("insert into orders (id, signature, state, created_at, updated_at) select gen_random_uuid(), 'ZZZZ-' || g || '-ZZZZ', case when g % 40 = 0 then 'unshipped' else 'shipped' end, now(), now() from generate_series(1, 4000) g");
+    DB::statement("insert into model_search_keys (subject_type, subject_id, kind, key, value, stage) select 'order', id::text, 'signature', lower(replace(signature, '-', '')), signature, 32767 from orders where signature like 'ZZZZ-%'");
+    DB::statement("insert into invoices (id, number, order_id, created_at, updated_at) select gen_random_uuid(), 'FV-' || row_number() over (), id, now(), now() from orders where signature like 'ZZZZ-%'");
+    DB::statement("insert into model_search_entries (subject_type, subject_id, stage, names, indexed_at) select 'invoice', id::text, 32767, '', now() from invoices");
+    DB::statement("insert into model_search_keys (subject_type, subject_id, kind, key, value, stage) select 'invoice', id::text, 'number', lower(replace(number, '-', '')), number, 32767 from invoices");
+    // Names that few records share: the trigram index is worth using only for a selective phrase.
+    DB::statement("update model_search_entries set names = 'zz' || substr(md5(subject_id), 1, 12) where subject_type = 'order'");
+    DB::statement("update model_search_entries set names = 'jan kowalski' where ctid in (select ctid from model_search_entries where subject_type = 'order' limit 15)");
     DB::statement('analyze orders');
+    DB::statement('analyze invoices');
     DB::statement('analyze model_search_keys');
     DB::statement('analyze model_search_entries');
+}
+
+/**
+ * Runs the assertions of one plan and names the plan in the message of the first one that fails.
+ *
+ * @param  Closure(): void  $assertions
+ */
+function psCheck(string $label, Closure $assertions): void
+{
+    try {
+        $assertions();
+    } catch (ExpectationFailedException $failure) {
+        throw new ExpectationFailedException('['.$label.'] '.$failure->getMessage(), $failure->getComparisonFailure(), $failure);
+    }
 }
 
 /**
@@ -201,40 +226,28 @@ function psAssertShape(array $plan, bool $invoices = false): array
     return ['keyScans' => $keyScans, 'stageZeroScans' => $stageZeroScans, 'hostScans' => $hostScans, 'primaryScans' => $primaryScans];
 }
 
-describe('round one', function (): void {
-    foreach (psViewers() as $viewer => $host) {
-        foreach ([
-            'a prefix of a key' => 'abc12',
-            'a full number' => 'abc-1234',
-            'a suffix' => '12345',
-            'one name word' => 'kowalski12',
-            'a name prefix' => 'kowal',
-            'two name words' => 'jan kowal',
-        ] as $label => $phrase) {
-            it("keeps index scans under limits, a nested loop over the host and no gather for {$label} ({$viewer})", function () use ($host, $phrase): void {
-                psSeed();
-                $query = OrderSearch::query($phrase)->within($host());
+it('keeps the shape of every statement: index scans under limits, nested loops over the host, no sequential scan, no gather', function (): void {
+    // The data is seeded ONCE; every plan below is checked against it, for the viewer who sees everything and the one with a scope.
+    psSeed();
 
-                $shape = psAssertShape(psPlan(RoundOne::sql(psTargets($query))));
+    foreach (psViewers() as $viewer => $host) {
+        foreach (['a prefix of a key' => 'abc12', 'a full number' => 'abc-1234', 'a suffix' => '12345', 'one name word' => 'kowalski12', 'a name prefix' => 'kowal', 'two name words' => 'jan kowal'] as $label => $phrase) {
+            psCheck("round one, {$label}, {$viewer}", function () use ($host, $phrase): void {
+                $shape = psAssertShape(psPlan(RoundOne::sql(psTargets(OrderSearch::query($phrase)->within($host())))));
 
                 expect($shape['keyScans'])->toBeGreaterThan(0)
                     ->and($shape['primaryScans'])->toBeGreaterThan(0);
             });
         }
 
-        it("reads the first stage from the stage-zero indexes without touching the entries ({$viewer})", function () use ($host): void {
-            psSeed();
-            $query = OrderSearch::query('abc12')->within($host());
-
-            $shape = psAssertShape(psPlan(RoundOne::sql(psTargets($query))));
+        psCheck("round one, stage zero, {$viewer}", function () use ($host): void {
+            $shape = psAssertShape(psPlan(RoundOne::sql(psTargets(OrderSearch::query('abc12')->within($host())))));
 
             expect($shape['stageZeroScans'])->toBeGreaterThan(0);
         });
 
-        it("keeps the early stop of a two-word name phrase: name-word index under limit, nested loop, lateral limit 1, no semi join ({$viewer})", function () use ($host): void {
-            psSeed();
-            $query = OrderSearch::query('jan kowal')->within($host())->withoutStages();
-            $plan = psPlan(RoundOne::sql(psTargets($query)));
+        psCheck("round one, two name words, early stop, {$viewer}", function () use ($host): void {
+            $plan = psPlan(RoundOne::sql(psTargets(OrderSearch::query('jan kowal')->within($host())->withoutStages())));
             $nodes = psWalk($plan);
             $words = array_values(array_filter($nodes, static fn (array $entry): bool => str_contains((string) ($entry['node']['Index Name'] ?? ''), 'keys_name_word')));
             $others = array_values(array_filter($nodes, static fn (array $entry): bool => str_contains((string) ($entry['node']['Index Name'] ?? ''), 'keys_pkey')));
@@ -254,19 +267,10 @@ describe('round one', function (): void {
                 ->and((string) $loops[array_key_last($loops)]['Plans'][0]['Index Name'])->toContain('keys_name_word');
             psAssertShape($plan);
         });
-    }
-});
 
-describe('round two', function (): void {
-    foreach (psViewers() as $viewer => $host) {
-        foreach ([
-            'stage zero' => RoundTwoPhase::StageZero,
-            'all stages' => RoundTwoPhase::AllStages,
-            'a type without stages' => RoundTwoPhase::Unstaged,
-        ] as $label => $phase) {
+        foreach (['stage zero' => RoundTwoPhase::StageZero, 'stage zero then all' => RoundTwoPhase::StageZeroThenAll, 'all stages' => RoundTwoPhase::AllStages, 'a type without stages' => RoundTwoPhase::Unstaged] as $label => $phase) {
             foreach (['abc12', 'jan kowal', '12345'] as $phrase) {
-                it("scopes the keys inside a lateral under the limit for {$label}, '{$phrase}' ({$viewer})", function () use ($host, $phase, $phrase): void {
-                    psSeed();
+                psCheck("round two, {$label}, '{$phrase}', {$viewer}", function () use ($host, $phase, $phrase): void {
                     $query = OrderSearch::query($phrase)->within($host());
                     $query = $phase === RoundTwoPhase::Unstaged ? $query->withoutStages() : $query;
                     $statement = RoundTwo::sql(psTargets($query), ['order' => $phase]);
@@ -280,63 +284,55 @@ describe('round two', function (): void {
                 });
             }
         }
+
+        // Note: with a SELECTIVE suffix (fewer expected matches than the limit) the planner may choose a bitmap scan with a sort for a parent
+        // candidate branch, which is correct there (no early stop to lose). It did not reproduce at 500 000 parents with a selective suffix
+        // (reviewer's probe); the phrase below is broad in prefix and in suffix, so the strict assertions are about the case that matters.
+        foreach (['round one' => false, 'round two' => true] as $round => $second) {
+            psCheck("via, {$round}, {$viewer}", function () use ($host, $second): void {
+                $query = InvoiceSearch::query('zzzz')->within(Invoice::query(), [Order::class => $host()]);
+                $targets = ['invoice' => ['definition' => app(ModelSearchRegistry::class)->for(Invoice::class), 'query' => $query, 'host' => $query->scope()]];
+                $statement = $second ? RoundTwo::sql($targets, ['invoice' => RoundTwoPhase::Unstaged]) : RoundOne::sql($targets);
+                $plan = psPlan($statement);
+                $nodes = psWalk($plan);
+                $parents = array_filter($nodes, static fn (array $entry): bool => psOn($entry['node'], 'orders'));
+                $children = array_filter($nodes, static fn (array $entry): bool => psOn($entry['node'], 'invoices'));
+
+                psAssertShape($plan, invoices: true);
+
+                expect($parents)->not->toBeEmpty()
+                    ->and($children)->not->toBeEmpty()
+                    ->and(array_filter($nodes, static fn (array $entry): bool => $entry['node']['Node Type'] === 'Seq Scan' && in_array($entry['node']['Relation Name'] ?? '', ['orders', 'invoices'], true)))->toBe([]);
+            });
+        }
     }
-});
 
-describe('via', function (): void {
-    foreach (psViewers() as $viewer => $host) {
-        it("keeps the parents of a path and their children on index scans under limits and nested loops ({$viewer})", function () use ($host): void {
-            psSeed();
-            // Orders whose number starts and ends alike, so that the prefix and the suffix of the phrase both match thousands of keys.
-            DB::statement("insert into orders (id, signature, state, created_at, updated_at) select gen_random_uuid(), 'ZZZZ-' || g || '-ZZZZ', case when g % 40 = 0 then 'unshipped' else 'shipped' end, now(), now() from generate_series(1, 4000) g");
-            DB::statement("insert into model_search_keys (subject_type, subject_id, kind, key, value, stage) select 'order', id::text, 'signature', lower(replace(signature, '-', '')), signature, 32767 from orders where signature like 'ZZZZ-%'");
-            DB::statement("insert into invoices (id, number, order_id, created_at, updated_at) select gen_random_uuid(), 'FV-' || row_number() over (), id, now(), now() from orders where signature like 'ZZZZ-%'");
-            DB::statement("insert into model_search_entries (subject_type, subject_id, stage, names, indexed_at) select 'invoice', id::text, 32767, '', now() from invoices");
-            DB::statement("insert into model_search_keys (subject_type, subject_id, kind, key, value, stage) select 'invoice', id::text, 'number', lower(replace(number, '-', '')), number, 32767 from invoices");
-            DB::statement('analyze orders');
-            DB::statement('analyze invoices');
-            DB::statement('analyze model_search_keys');
-            $query = InvoiceSearch::query('zzzz')->within(Invoice::query(), [Order::class => $host()]);
-            $targets = ['invoice' => ['definition' => app(ModelSearchRegistry::class)->for(Invoice::class), 'query' => $query, 'host' => $query->scope()]];
-
-            $plan = psPlan(RoundOne::sql($targets));
-            $nodes = psWalk($plan);
-            $parents = array_filter($nodes, static fn (array $entry): bool => psOn($entry['node'], 'orders'));
-            $children = array_filter($nodes, static fn (array $entry): bool => psOn($entry['node'], 'invoices'));
-
-            psAssertShape($plan, invoices: true);
-
-            expect($parents)->not->toBeEmpty()
-                ->and($children)->not->toBeEmpty()
-                ->and(array_filter($nodes, static fn (array $entry): bool => $entry['node']['Node Type'] === 'Seq Scan' && in_array($entry['node']['Relation Name'] ?? '', ['orders', 'invoices'], true)))->toBe([]);
-        });
-    }
-});
-
-describe('similar', function (): void {
-    it('reads the names through the trigram index', function (): void {
-        psSeed();
-        // A name that few records share: the index is worth using only for a selective phrase.
-        DB::statement("update model_search_entries set names = 'zz' || substr(md5(subject_id), 1, 12)");
-        DB::statement("update model_search_entries set names = 'jan kowalski' where ctid in (select ctid from model_search_entries limit 15)");
-        DB::statement('analyze model_search_entries');
-        $query = OrderSearch::query('kowalsky')->within(Order::query());
-        $statement = SimilarQuery::sql(app(ModelSearchRegistry::class)->for(Order::class), $query);
+    psCheck('similar', function (): void {
+        $statement = SimilarQuery::sql(app(ModelSearchRegistry::class)->for(Order::class), OrderSearch::query('kowalsky')->within(Order::query()));
 
         expect($statement)->not->toBeNull();
 
         $nodes = psWalk(psPlan($statement));
         $names = array_filter($nodes, static fn (array $entry): bool => str_contains((string) ($entry['node']['Index Name'] ?? ''), 'entries_names'));
+        $hosts = array_values(array_filter($nodes, static fn (array $entry): bool => psOn($entry['node'], 'orders')));
 
         expect($names)->not->toBeEmpty()
+            ->and($hosts)->not->toBeEmpty()
             ->and(array_filter($nodes, static fn (array $entry): bool => $entry['node']['Node Type'] === 'Seq Scan' && psOn($entry['node'], TableNames::forConnection()->entries())))->toBe([])
             ->and(array_filter($nodes, static fn (array $entry): bool => str_starts_with((string) $entry['node']['Node Type'], 'Gather')))->toBe([]);
+
+        foreach ($hosts as ['node' => $node, 'ancestors' => $ancestors]) {
+            expect($node['Node Type'])->toBeIn(['Index Scan', 'Index Only Scan'])
+                ->and($node['Index Name'])->toBe('orders_pkey')
+                ->and($ancestors[array_key_last($ancestors)]['Node Type'])->toBe('Nested Loop')
+                ->and($node['Parent Relationship'])->toBe('Inner');
+        }
     });
 });
 
 it('uses the predicates of the index plan in every branch', function (): void {
-    psSeed();
-    $sql = RoundOne::sql(psTargets(OrderSearch::query('abc12')->within(Order::query())))['sql'];
+    $query = OrderSearch::query('abc12')->within(Order::query());
+    $sql = RoundOne::sql(psTargets($query))['sql'];
 
     expect($sql)->toContain('k.'.IndexPlan::GENERIC_KEYS)
         ->and($sql)->toContain('k.'.IndexPlan::STAGE_ZERO);
