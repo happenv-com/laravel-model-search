@@ -21,6 +21,8 @@ return [
         'budget_ms' => 50000,
         'log_rebuild_threshold' => 1000000,
         'unknown_grace_seconds' => 3600,
+        'foreign_grace_seconds' => 3600,
+        'allowed_transaction_level' => 0,
     ],
     'apply' => ['max_ids' => 10000],
     'lag_alarm_seconds' => 300,

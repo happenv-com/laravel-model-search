@@ -22,7 +22,7 @@ use Throwable;
  * root nodes, so the work spreads over later batches instead of lengthening this transaction.
  *
  * Memory and transaction length stay bounded: once the roots gathered reach the batch cap, the
- * nodes not yet expanded are handed back unresolved (the caller writes them back to the log).
+ * nodes not yet expanded are handed back unresolved (the caller leaves their log rows where they are).
  * Every expansion runs in its own savepoint; a node that cannot be expanded (an id that does not
  * cast to the key type) is counted and dropped without costing the others.
  */
@@ -117,23 +117,6 @@ final class RootResolver
         return $db->affectingStatement(
             sprintf('INSERT INTO %s ("node_type", "node_id") SELECT ?, u."id" FROM unnest(?::text[]) AS u("id")', $this->names->quoted($this->names->changes())),
             [$alias, Sql::arrayLiteral($rootIds)],
-        );
-    }
-
-    /**
-     * Writes nodes that were not expanded back to the log, as they were.
-     *
-     * @param  list<array{string, string}>  $nodes
-     */
-    public function defer(Connection $db, array $nodes): void
-    {
-        if ($nodes === []) {
-            return;
-        }
-
-        $db->affectingStatement(
-            sprintf('INSERT INTO %s ("node_type", "node_id") SELECT u."type", u."id" FROM unnest(?::text[], ?::text[]) AS u("type", "id")', $this->names->quoted($this->names->changes())),
-            [Sql::arrayLiteral(array_column($nodes, 0)), Sql::arrayLiteral(array_column($nodes, 1))],
         );
     }
 

@@ -142,7 +142,7 @@ final readonly class TriggerSql
         $truncate = $roots === []
             ? []
             : [sprintf(
-                'UPDATE %s SET "rebuild_cursor" = %s, "rebuild_started_at" = clock_timestamp() WHERE "subject_type" IN (%s);',
+                'UPDATE %s SET "rebuild_cursor" = %s, "rebuild_started_at" = clock_timestamp(), "sweep_cursor" = NULL WHERE "subject_type" IN (%s);',
                 $state,
                 self::literal(''),
                 implode(', ', array_map(self::literal(...), $roots)),

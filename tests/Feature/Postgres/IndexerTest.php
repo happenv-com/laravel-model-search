@@ -17,6 +17,8 @@ use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Parcel;
 use Happenv\ModelSearch\Tests\Fixtures\Normalizers\HookedNormalizer;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderPathInvoiceSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderPathParcelSearch;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -579,7 +581,9 @@ describe('rebuilds', function (): void {
             ->and($stats->rebuildBatches)->toBe(1)
             ->and(ixLog())->toBe([])
             ->and(ixKeys('order', $live))->toContain('name_word|live')
-            ->and($row['rebuild_cursor'])->not->toBeNull()->not->toBe('')
+            // the rebuild is under way (still sweeping the old entries, a bounded step per round) and not ready
+            ->and($row['rebuild_cursor'])->not->toBeNull()
+            ->and($row['sweep_cursor'])->not->toBeNull()
             ->and($row['ready_at'])->toBeNull();
     });
 
@@ -1049,17 +1053,6 @@ describe('bounded work (M3, M4, M7)', function (): void {
 });
 
 describe('internals of the fix round', function (): void {
-    it('sweeps key rows that have no entry', function (): void {
-        $state = new IndexState;
-        $state->recordInstall(app(ModelSearchRegistry::class)->for(Order::class));
-        DB::table(ixTable('keys'))->insert(['subject_type' => 'order', 'subject_id' => (string) Str::uuid(), 'kind' => 'signature', 'key' => 'orphan', 'value' => 'ORPHAN', 'stage' => 0]);
-
-        $stats = ixIndexer()->drainNow();
-
-        expect(DB::table(ixTable('keys'))->count())->toBe(0)
-            ->and($stats->keysDeleted)->toBe(1);
-    });
-
     it('resolves the key type from the catalog when the definition carries none', function (): void {
         expect(app(ModelSearchRegistry::class)->for(Order::class)->resolvedKeySqlType())->toBe('uuid');
     });
@@ -1074,5 +1067,213 @@ describe('internals of the fix round', function (): void {
         DB::disableQueryLog();
 
         expect($statements)->toHaveCount(1);
+    });
+});
+
+function ixSharedRegistry(): ModelSearchRegistry
+{
+    $registry = new ModelSearchRegistry;
+    $registry->register(OrderPathParcelSearch::class);
+    $registry->register(OrderPathInvoiceSearch::class);
+    $registry->all();
+
+    return $registry;
+}
+
+/** The invoice type belongs to another release: a state row with a fingerprint this release does not have. */
+function ixForeignInvoice(): void
+{
+    DB::table(ixTable('state'))->insert([
+        'subject_type' => 'invoice', 'definition_fingerprint' => 'another-release', 'definition_version' => 1,
+        'installed_at' => now(), 'ready_at' => now(),
+    ]);
+}
+
+function ixParcel(string $order, string $reference): string
+{
+    $id = (string) Str::uuid();
+    DB::table('parcels')->insert(['id' => $id, 'order_id' => $order, 'reference' => $reference]);
+
+    return $id;
+}
+
+describe('handing kept rows over by age (R15)', function (): void {
+    it('keeps a row an unowned type also reads while it is young, hands it over once it is old', function (): void {
+        ixForeignInvoice();
+        $registry = ixSharedRegistry();
+        $order = ixOrder(['signature' => 'SIG-A']);
+        $parcel = ixParcel($order, 'P-1');
+        ixIndexer($registry)->drainNow();
+        DB::table(ixTable('changes'))->delete();
+
+        DB::table('orders')->where('id', $order)->update(['signature' => 'SIG-B']);
+        DB::table(ixTable('changes'))->delete();
+        DB::table(ixTable('changes'))->insert(['node_type' => 'table:orders', 'node_id' => $order]);
+
+        $young = ixIndexer($registry)->drainNow();
+
+        expect(ixKeys('parcel', $parcel))->toContain('order_signature|sigb')
+            ->and(ixLog())->toBe(['table:orders|'.$order])
+            ->and($young->handedOffRows)->toBe(0)
+            ->and(DB::table(ixTable('state'))->where('subject_type', 'invoice')->value('rebuild_cursor'))->toBeNull();
+
+        DB::table('orders')->where('id', $order)->update(['signature' => 'SIG-C']);
+        DB::table(ixTable('changes'))->where('node_type', '<>', 'table:orders')->delete();
+        DB::table(ixTable('changes'))->update(['changed_at' => now()->subHours(2)]);
+
+        $old = ixIndexer($registry)->drainNow();
+
+        expect(ixKeys('parcel', $parcel))->toContain('order_signature|sigc')
+            ->and(ixLog())->toBe([])
+            ->and($old->handedOffRows)->toBe(1)
+            ->and(DB::table(ixTable('state'))->where('subject_type', 'invoice')->value('rebuild_cursor'))->toBe('')
+            // flagged only: the owner rebuilds, this release did not touch the invoice index
+            ->and(DB::table(ixTable('entries'))->where('subject_type', 'invoice')->count())->toBe(0);
+    });
+
+    it('does not flag a rebuild that is already pending or running', function (): void {
+        ixForeignInvoice();
+        DB::table(ixTable('state'))->where('subject_type', 'invoice')->update(['rebuild_cursor' => 'abc']);
+        $registry = ixSharedRegistry();
+        $order = ixOrder();
+        DB::table(ixTable('changes'))->delete();
+        DB::table(ixTable('changes'))->insert(['node_type' => 'table:orders', 'node_id' => $order, 'changed_at' => now()->subHours(2)]);
+
+        ixIndexer($registry)->drainNow();
+
+        expect(DB::table(ixTable('state'))->where('subject_type', 'invoice')->value('rebuild_cursor'))->toBe('abc');
+    });
+
+    it('old kept rows do not block newer rows', function (): void {
+        ixForeignInvoice();
+        config(['model-search.drain.rows' => 2]);
+        $registry = ixSharedRegistry();
+        $order = ixOrder();
+        $parcel = ixParcel($order, 'P-1');
+        ixIndexer($registry)->drainNow();
+        DB::table(ixTable('changes'))->delete();
+
+        foreach (range(1, 3) as $ignored) {
+            DB::table(ixTable('changes'))->insert(['node_type' => 'table:orders', 'node_id' => $order, 'changed_at' => now()->subHours(2)]);
+        }
+
+        DB::table('parcels')->where('id', $parcel)->update(['reference' => 'P-2']);
+
+        ixIndexer($registry)->drainNow();
+
+        expect(ixKeys('parcel', $parcel))->toContain('reference|p2')
+            ->and(ixLog())->toBe([]);
+    });
+
+    it('hands over a row only unowned types read, once it is old', function (): void {
+        ixForeignInvoice();
+        $registry = new ModelSearchRegistry;
+        $registry->register(OrderPathInvoiceSearch::class);
+        $order = ixOrder();
+        DB::table(ixTable('changes'))->delete();
+        DB::table(ixTable('changes'))->insert([
+            ['node_type' => 'table:orders', 'node_id' => $order, 'changed_at' => now()->subHours(2)],
+            ['node_type' => 'table:orders', 'node_id' => 'young', 'changed_at' => now()],
+        ]);
+
+        ixIndexer($registry)->drainNow();
+
+        expect(ixLog())->toBe(['table:orders|young'])
+            ->and(DB::table(ixTable('state'))->where('subject_type', 'invoice')->value('rebuild_cursor'))->toBe('');
+    });
+
+    it('never writes a node back to the log while its own row is kept', function (): void {
+        ixForeignInvoice();
+        config(['model-search.drain.rows' => 2, 'model-search.drain.nodes' => 2]);
+        $registry = ixSharedRegistry();
+        $first = ixOrder();
+        $second = ixOrder();
+
+        foreach ([$first, $second] as $order) {
+            foreach (range(1, 3) as $number) {
+                ixParcel($order, 'P-'.$number);
+            }
+        }
+
+        ixIndexer($registry)->drainNow();
+        DB::table(ixTable('changes'))->delete();
+        DB::table(ixTable('changes'))->insert([['node_type' => 'table:orders', 'node_id' => $first], ['node_type' => 'table:orders', 'node_id' => $second]]);
+
+        // The first node fans out to three parcels, which fills the cap of two: the second is deferred.
+        ixIndexer($registry)->drain(0);
+
+        $log = DB::table(ixTable('changes'))->where('node_type', 'table:orders')->pluck('node_id')->sort()->values()->all();
+
+        expect($log)->toBe(collect([$first, $second])->sort()->values()->all());
+    });
+});
+
+describe('the bounded sweep', function (): void {
+    it('walks the entries with a cursor, a bounded step per drain', function (): void {
+        foreach (range(1, 5) as $ignored) {
+            ixOrder();
+        }
+
+        ixIndexer()->drainNow();
+        $state = new IndexState;
+        $state->recordInstall(app(ModelSearchRegistry::class)->for(Order::class));
+        ixIndexer()->drainNow();
+        DB::statement('TRUNCATE orders');
+        config(['model-search.drain.rows' => 2]);
+
+        $left = [];
+        $cursors = [];
+        DB::enableQueryLog();
+
+        foreach (range(1, 3) as $ignored) {
+            ixIndexer()->drain(0);
+            $left[] = DB::table(ixTable('entries'))->where('subject_type', 'order')->count();
+            $cursors[] = DB::table(ixTable('state'))->where('subject_type', 'order')->value('sweep_cursor');
+        }
+
+        $queries = array_column(DB::getQueryLog(), 'query');
+        DB::disableQueryLog();
+
+        expect($left)->toBe([3, 1, 0])
+            ->and($cursors[0])->not->toBeNull()
+            ->and($cursors[1])->not->toBeNull()->not->toBe($cursors[0])
+            ->and($cursors[2])->toBeNull()
+            ->and(array_filter($queries, static fn (string $sql): bool => str_contains($sql, 'UNION')))->toBe([])
+            ->and($state->find('order')['rebuild_cursor'])->toBeNull();
+    });
+
+    it('restarts the sweep when the rebuild is flagged again', function (): void {
+        foreach (range(1, 4) as $ignored) {
+            ixOrder();
+        }
+
+        ixIndexer()->drainNow();
+        $state = new IndexState;
+        $state->recordInstall(app(ModelSearchRegistry::class)->for(Order::class));
+        DB::statement('TRUNCATE orders');
+        config(['model-search.drain.rows' => 2]);
+        ixIndexer()->drain(0);
+
+        expect(DB::table(ixTable('state'))->where('subject_type', 'order')->value('sweep_cursor'))->not->toBeNull();
+
+        DB::statement('TRUNCATE orders');
+
+        expect(DB::table(ixTable('state'))->where('subject_type', 'order')->value('sweep_cursor'))->toBeNull();
+
+        $state->markForRebuild(['order']);
+        ixIndexer()->drainNow();
+
+        expect(DB::table(ixTable('entries'))->where('subject_type', 'order')->count())->toBe(0);
+    });
+});
+
+describe('the allowed transaction level (M7)', function (): void {
+    it('is configurable and defaults to refusing any open transaction', function (): void {
+        ixOrder();
+        config(['model-search.drain.allowed_transaction_level' => 0]);
+
+        expect(fn () => ixIndexer()->drain(0))->toThrow(DrainInsideTransaction::class);
+        expect(config('model-search.drain.allowed_transaction_level'))->toBe(0);
+        expect((require __DIR__.'/../../../config/model-search.php')['drain']['allowed_transaction_level'])->toBe(0);
     });
 });

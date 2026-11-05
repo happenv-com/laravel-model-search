@@ -33,6 +33,10 @@ use Throwable;
  * Writers are never blocked: the triggers only INSERT into the change log, and a batch deletes only
  * the log rows it read. A drain alternates one batch of the change log with one batch of a pending
  * rebuild, so a rebuild cannot starve live changes and live changes cannot starve a rebuild.
+ *
+ * A release applies changes and rebuilds only for the types it owns (see {@see IndexState}). It may,
+ * for types it does not own, only flag a rebuild or enqueue a row: the oversized-log switch, the
+ * handoff of aged log rows and the retry of due failures. The owner does the work.
  */
 final class SearchIndexer
 {
@@ -69,8 +73,8 @@ final class SearchIndexer
             return $stats;
         }
 
-        // Under the test harness the whole test runs in one transaction, so one level is the baseline.
-        if ($this->db()->transactionLevel() > (app()->runningUnitTests() ? 1 : 0)) {
+        // A host that wraps everything in one transaction (a test harness) raises the allowed level.
+        if ($this->db()->transactionLevel() > (int) config('model-search.drain.allowed_transaction_level', 0)) {
             throw new DrainInsideTransaction('A drain must not run inside an open transaction: its advisory lock and its events would leak into the caller\'s transaction.');
         }
 
@@ -176,7 +180,7 @@ final class SearchIndexer
                 if ($ownership[$definition->morphAlias]) {
                     $readable[$type] = true;
                 } else {
-                    $foreign[$type] = true;
+                    $foreign[$type][] = $definition->morphAlias;
                 }
             }
         }
@@ -186,15 +190,25 @@ final class SearchIndexer
                 return null;
             }
 
-            // Rows of types only an unowned definition reads stay where they are; rows of types nobody
-            // knows are read only once they are older than the grace period, so they never stall the batch.
+            // A row an unowned definition reads is kept for its owner while it is young; once it is old the
+            // owner is assumed to be away, so the rebuild of the unowned types is flagged and the row goes.
+            // Rows of types nobody knows wait out their own grace period, so they never stall the batch.
+            $foreignGrace = max(0, (int) config('model-search.drain.foreign_grace_seconds', 3600));
             $rows = $db->select(
                 sprintf(
-                    'SELECT "id", "node_type", "node_id" FROM %s WHERE ("node_type" = ANY(?::text[]) OR ("node_type" <> ALL(?::text[]) AND "changed_at" < clock_timestamp() - make_interval(secs => ?::double precision))) AND "id" <> ALL(?::bigint[]) ORDER BY "id" LIMIT %d',
+                    'SELECT "id", "node_type", "node_id", ("changed_at" < clock_timestamp() - make_interval(secs => ?::double precision)) AS "aged" FROM %1$s WHERE ("node_type" = ANY(?::text[]) OR ("node_type" = ANY(?::text[]) AND "changed_at" < clock_timestamp() - make_interval(secs => ?::double precision)) OR ("node_type" <> ALL(?::text[]) AND "changed_at" < clock_timestamp() - make_interval(secs => ?::double precision))) AND "id" <> ALL(?::bigint[]) ORDER BY "id" LIMIT %2$d',
                     $changes,
                     max(1, (int) config('model-search.drain.rows', 5000)),
                 ),
-                [Sql::arrayLiteral(array_map(strval(...), array_keys($readable))), Sql::arrayLiteral(array_map(strval(...), array_keys($known))), max(0, (int) config('model-search.drain.unknown_grace_seconds', 3600)), Sql::arrayLiteral($this->skipIds)],
+                [
+                    $foreignGrace,
+                    Sql::arrayLiteral(array_map(strval(...), array_keys($readable))),
+                    Sql::arrayLiteral(array_map(strval(...), array_keys($foreign))),
+                    $foreignGrace,
+                    Sql::arrayLiteral(array_map(strval(...), array_keys($known))),
+                    max(0, (int) config('model-search.drain.unknown_grace_seconds', 3600)),
+                    Sql::arrayLiteral($this->skipIds),
+                ],
             );
 
             if ($rows === []) {
@@ -202,29 +216,20 @@ final class SearchIndexer
             }
 
             [$read, $nodes] = $this->dedupe($rows);
-
-            // A row an unowned type also reads is applied for the owned types and left in the log.
-            $consumed = [];
-
-            foreach ($rows as $row) {
-                if (! in_array((int) $row->id, $read, true)) {
-                    continue;
-                }
-
-                if (isset($foreign[(string) $row->node_type])) {
-                    $this->skipIds[] = (int) $row->id;
-                } else {
-                    $consumed[] = (int) $row->id;
-                }
-            }
+            $readSet = array_flip($read);
+            $applicable = array_values(array_filter($nodes, static fn (array $node): bool => isset($readable[$node[0]]) || ! isset($foreign[$node[0]])));
 
             $batch->logBatches++;
             $batch->logRowsRead = count($read);
             $batch->nodes = count($nodes);
 
             $cap = max((int) config('model-search.drain.rows', 5000), (int) config('model-search.drain.nodes', 1000), 1);
-            $resolved = $this->resolver()->resolve($db, $owned, $nodes, $batch, $cap);
-            $this->resolver()->defer($db, $resolved['deferred']);
+            $resolved = $this->resolver()->resolve($db, $owned, $applicable, $batch, $cap);
+            $deferred = [];
+
+            foreach ($resolved['deferred'] as [$type, $id]) {
+                $deferred[$type."\0".$id] = true;
+            }
 
             foreach ($resolved['roots'] as $alias => $rootIds) {
                 if (count($rootIds) > $cap) {
@@ -233,6 +238,39 @@ final class SearchIndexer
                 }
 
                 $this->reindex($owned[$alias], $rootIds, $batch);
+            }
+
+            // Deferred nodes keep their rows (they are read again first), kept rows keep theirs; the rest go.
+            $consumed = [];
+            $flag = [];
+
+            foreach ($rows as $row) {
+                $id = (int) $row->id;
+                $type = (string) $row->node_type;
+
+                if (! isset($readSet[$id]) || isset($deferred[$type."\0".$row->node_id])) {
+                    continue;
+                }
+
+                if (isset($foreign[$type]) && ! $row->aged) {
+                    $this->skipIds[] = $id;
+
+                    continue;
+                }
+
+                if (isset($foreign[$type])) {
+                    $batch->handedOffRows++;
+
+                    foreach ($foreign[$type] as $alias) {
+                        $flag[$alias] = true;
+                    }
+                }
+
+                $consumed[] = $id;
+            }
+
+            if ($flag !== []) {
+                $batch->flaggedTypes = array_map(strval(...), array_keys($this->flagRebuilds($db, array_keys($flag))));
             }
 
             if ($consumed !== []) {
@@ -308,7 +346,7 @@ final class SearchIndexer
             $limit = max(1, (int) config('model-search.drain.rows', 5000));
             $batch->rebuildBatches++;
 
-            if ($cursor === '' && $this->sweep($db, $definition, $limit, $batch) >= $limit) {
+            if ($cursor === '' && ! $this->sweep($db, $definition, $row['sweep_cursor'], $limit, $batch)) {
                 return true;
             }
 
@@ -319,7 +357,7 @@ final class SearchIndexer
 
             if (count($ids) < $limit) {
                 $done = $db->affectingStatement(
-                    sprintf('UPDATE %s SET "rebuild_cursor" = NULL, "rebuild_started_at" = NULL, "ready_at" = COALESCE("ready_at", clock_timestamp()) WHERE "subject_type" = ? AND "rebuild_cursor" = ?', $state),
+                    sprintf('UPDATE %s SET "rebuild_cursor" = NULL, "rebuild_started_at" = NULL, "sweep_cursor" = NULL, "ready_at" = COALESCE("ready_at", clock_timestamp()) WHERE "subject_type" = ? AND "rebuild_cursor" = ?', $state),
                     [$type, $cursor],
                 );
 
@@ -364,46 +402,61 @@ final class SearchIndexer
     }
 
     /**
-     * Removes entries (and their keys) whose root no longer exists or is soft deleted: what a
-     * TRUNCATE leaves behind, since it logs nothing per row. Bounded per call.
+     * One bounded step of the sweep that opens a rebuild: walks the type's entries by key from the
+     * sweep cursor, `drain.rows` at a time, and removes the entries and key rows of roots that no
+     * longer exist or are soft deleted (what a TRUNCATE leaves behind, since it logs nothing per
+     * row). The cursor is advanced by compare-and-swap, so a restart of the rebuild in the meantime
+     * wins. Key rows without an entry are not looked for here: entry and keys are written in one
+     * transaction, and the doctor checks for strays.
+     *
+     * @return bool True when the whole type was walked.
      */
-    private function sweep(Connection $db, CompiledDefinition $definition, int $limit, DrainStats $batch): int
+    private function sweep(Connection $db, CompiledDefinition $definition, ?string $cursor, int $limit, DrainStats $batch): bool
     {
         $model = new ($definition->modelClass);
         $soft = Sql::softDeleteColumn($model);
         $entries = $this->names()->quoted($this->names()->entries());
         $keys = $this->names()->quoted($this->names()->keys());
+        $type = $definition->morphAlias;
 
-        $type = $definition->resolvedKeySqlType();
-        $source = sprintf('SELECT 1 FROM %s AS r WHERE r.%s = %%s::%s%s', Sql::table($model), Sql::ident($model->getKeyName()), $type, $soft === null ? '' : sprintf(' AND r.%s IS NULL', Sql::ident($soft)));
-
-        // Entries whose root is gone, and key rows whose root is gone (also those without an entry).
-        $row = $db->selectOne(
-            sprintf(
-                'WITH "gone" AS (SELECT u."subject_id" FROM (SELECT e."subject_id" FROM %1$s AS e WHERE e."subject_type" = ? AND NOT EXISTS (%3$s) UNION SELECT k."subject_id" FROM %2$s AS k WHERE k."subject_type" = ? AND NOT EXISTS (%4$s)) AS u LIMIT %5$d), "deleted_keys" AS (DELETE FROM %2$s AS k USING "gone" AS g WHERE k."subject_type" = ? AND k."subject_id" = g."subject_id" RETURNING 1), "deleted_entries" AS (DELETE FROM %1$s AS e USING "gone" AS g WHERE e."subject_type" = ? AND e."subject_id" = g."subject_id" RETURNING 1) SELECT (SELECT count(*) FROM "gone") AS "gone", (SELECT count(*) FROM "deleted_entries") AS "entries", (SELECT count(*) FROM "deleted_keys") AS "keys"',
-                $entries,
-                $keys,
-                sprintf($source, 'e."subject_id"'),
-                sprintf($source, 'k."subject_id"'),
-                $limit,
+        $page = array_values(array_map(
+            static fn (stdClass $row): string => (string) $row->subject_id,
+            $db->select(
+                sprintf('SELECT "subject_id" FROM %s WHERE "subject_type" = ?%s ORDER BY "subject_id" LIMIT %d', $entries, $cursor === null ? '' : ' AND "subject_id" > ?', $limit),
+                $cursor === null ? [$type] : [$type, $cursor],
             ),
-            [$definition->morphAlias, $definition->morphAlias, $definition->morphAlias, $definition->morphAlias],
+        ));
+
+        if ($page !== []) {
+            $gone = array_values(array_map(
+                static fn (stdClass $row): string => (string) $row->id,
+                $db->select(
+                    sprintf(
+                        'SELECT u."id" FROM unnest(?::text[]) AS u("id") WHERE NOT EXISTS (SELECT 1 FROM %s AS r WHERE r.%s = u."id"::%s%s)',
+                        Sql::table($model),
+                        Sql::ident($model->getKeyName()),
+                        $definition->resolvedKeySqlType(),
+                        $soft === null ? '' : sprintf(' AND r.%s IS NULL', Sql::ident($soft)),
+                    ),
+                    [Sql::arrayLiteral($page)],
+                ),
+            ));
+
+            if ($gone !== []) {
+                $batch->keysDeleted += $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $keys), [$type, Sql::arrayLiteral($gone)]);
+                $batch->entriesDeleted += $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $entries), [$type, Sql::arrayLiteral($gone)]);
+                $batch->touch($type);
+            }
+        }
+
+        $finished = count($page) < $limit;
+        $next = $finished ? null : $page[count($page) - 1];
+        $moved = $db->affectingStatement(
+            sprintf('UPDATE %s SET "sweep_cursor" = ? WHERE "subject_type" = ? AND "rebuild_cursor" = \'\' AND "sweep_cursor" IS NOT DISTINCT FROM ?', $this->names()->quoted($this->names()->state())),
+            [$next, $type, $cursor],
         );
 
-        if (! $row instanceof stdClass) {
-            return 0;
-        }
-
-        $removed = (int) $row->entries;
-        $removedKeys = (int) $row->keys;
-
-        if ($removed + $removedKeys > 0) {
-            $batch->entriesDeleted += $removed;
-            $batch->keysDeleted += $removedKeys;
-            $batch->touch($definition->morphAlias);
-        }
-
-        return (int) $row->gone;
+        return $moved === 1 && $finished;
     }
 
     /**
@@ -548,7 +601,7 @@ final class SearchIndexer
             }
 
             $rows = $db->select(
-                sprintf('UPDATE %s SET "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp() WHERE "subject_type" = ANY(?::text[]) RETURNING "subject_type"', $this->names()->quoted($this->names()->state())),
+                sprintf('UPDATE %s SET "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp(), "sweep_cursor" = NULL WHERE "subject_type" = ANY(?::text[]) RETURNING "subject_type"', $this->names()->quoted($this->names()->state())),
                 [Sql::arrayLiteral($candidates)],
             );
 
@@ -587,6 +640,29 @@ final class SearchIndexer
         if ($stats->lagSeconds !== null && $alarm > 0 && $stats->lagSeconds >= $alarm) {
             Event::dispatch(new SearchIndexLagging($stats->lagSeconds, $alarm));
         }
+    }
+
+    /**
+     * Asks the owner to rebuild types this release does not own: a flag only, and only when no rebuild
+     * is pending or running (the owner does the work).
+     *
+     * @param  list<int|string>  $aliases
+     * @return array<string, true> The types that were flagged.
+     */
+    private function flagRebuilds(Connection $db, array $aliases): array
+    {
+        $rows = $db->select(
+            sprintf('UPDATE %s SET "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp(), "sweep_cursor" = NULL WHERE "subject_type" = ANY(?::text[]) AND "rebuild_cursor" IS NULL RETURNING "subject_type"', $this->names()->quoted($this->names()->state())),
+            [Sql::arrayLiteral(array_map(strval(...), $aliases))],
+        );
+
+        $flagged = [];
+
+        foreach ($rows as $row) {
+            $flagged[(string) $row->subject_type] = true;
+        }
+
+        return $flagged;
     }
 
     private function announce(DrainStats $batch): void

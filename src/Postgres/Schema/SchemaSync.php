@@ -204,7 +204,7 @@ final readonly class SchemaSync
         [$installs, $refusals] = $this->install($left);
 
         if ($left !== []) {
-            throw SchemaSyncIncomplete::leaving(array_map(static fn (SchemaChange $change): string => $change->subject, $left));
+            throw SchemaSyncIncomplete::leaving(array_map(static fn (SchemaChange $change): string => $change->subject, $left), $refusals);
         }
 
         return new SyncOutcome($changes, null, $installs, $refusals);

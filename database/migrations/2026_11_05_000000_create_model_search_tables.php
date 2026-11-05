@@ -70,6 +70,7 @@ return new class extends Migration
             $table->timestampTz('ready_at', 6)->nullable();
             $table->text('rebuild_cursor')->nullable();
             $table->timestampTz('rebuild_started_at', 6)->nullable();
+            $table->text('sweep_cursor')->nullable();
         });
 
         Schema::create($names->failures(), function (Blueprint $table): void {

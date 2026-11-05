@@ -31,6 +31,10 @@ use Throwable;
  * to an older release therefore requires bumping `ModelSearch::version()` and installing again;
  * otherwise no release owns the type and its log rows wait.
  *
+ * Flagging a rebuild (the drain's oversized-log switch and the handoff of aged log rows) and
+ * re-queueing failed records (`PoisonRecords::requeueDue`) may act on types this release does not
+ * own: they only set a flag or enqueue a row. Applying changes and rebuilding stay owner-only.
+ *
  * `ready_at` is cached for a few seconds as a plain boolean; the cache is only a way to spare the
  * database on the hot path, never a source of truth.
  */
@@ -115,7 +119,7 @@ final readonly class IndexState
             }
 
             $db->update(
-                sprintf('UPDATE %s SET "definition_fingerprint" = ?, "definition_version" = ?, "installed_at" = clock_timestamp(), "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp() WHERE "subject_type" = ?', $table),
+                sprintf('UPDATE %s SET "definition_fingerprint" = ?, "definition_version" = ?, "installed_at" = clock_timestamp(), "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp(), "sweep_cursor" = NULL WHERE "subject_type" = ?', $table),
                 [$fingerprint, $version, $type],
             );
 
@@ -128,7 +132,7 @@ final readonly class IndexState
     }
 
     /**
-     * @return array{subject_type: string, definition_fingerprint: string, definition_version: int, installed_at: string, ready_at: string|null, rebuild_cursor: string|null, rebuild_started_at: string|null}|null
+     * @return array{subject_type: string, definition_fingerprint: string, definition_version: int, installed_at: string, ready_at: string|null, rebuild_cursor: string|null, rebuild_started_at: string|null, sweep_cursor: string|null}|null
      */
     public function find(string $subjectType): ?array
     {
@@ -140,7 +144,7 @@ final readonly class IndexState
     /**
      * Types that have a rebuild pending, oldest first.
      *
-     * @return list<array{subject_type: string, definition_fingerprint: string, definition_version: int, installed_at: string, ready_at: string|null, rebuild_cursor: string|null, rebuild_started_at: string|null}>
+     * @return list<array{subject_type: string, definition_fingerprint: string, definition_version: int, installed_at: string, ready_at: string|null, rebuild_cursor: string|null, rebuild_started_at: string|null, sweep_cursor: string|null}>
      */
     public function pendingRebuilds(): array
     {
@@ -163,7 +167,7 @@ final readonly class IndexState
         }
 
         $rows = $this->db()->select(
-            sprintf('UPDATE %s SET "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp() WHERE "subject_type" = ANY(?::text[]) RETURNING "subject_type"', $this->table()),
+            sprintf('UPDATE %s SET "rebuild_cursor" = \'\', "rebuild_started_at" = clock_timestamp(), "sweep_cursor" = NULL WHERE "subject_type" = ANY(?::text[]) RETURNING "subject_type"', $this->table()),
             [Sql::arrayLiteral($subjectTypes)],
         );
 
@@ -200,7 +204,7 @@ final readonly class IndexState
 
     /**
      * @param  array<string, mixed>  $row
-     * @return array{subject_type: string, definition_fingerprint: string, definition_version: int, installed_at: string, ready_at: string|null, rebuild_cursor: string|null, rebuild_started_at: string|null}
+     * @return array{subject_type: string, definition_fingerprint: string, definition_version: int, installed_at: string, ready_at: string|null, rebuild_cursor: string|null, rebuild_started_at: string|null, sweep_cursor: string|null}
      */
     private function row(array $row): array
     {
@@ -212,6 +216,7 @@ final readonly class IndexState
             'ready_at' => isset($row['ready_at']) ? (string) $row['ready_at'] : null,
             'rebuild_cursor' => isset($row['rebuild_cursor']) ? (string) $row['rebuild_cursor'] : null,
             'rebuild_started_at' => isset($row['rebuild_started_at']) ? (string) $row['rebuild_started_at'] : null,
+            'sweep_cursor' => isset($row['sweep_cursor']) ? (string) $row['sweep_cursor'] : null,
         ];
     }
 

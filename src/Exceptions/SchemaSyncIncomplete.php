@@ -12,14 +12,21 @@ use RuntimeException;
  */
 final class SchemaSyncIncomplete extends RuntimeException
 {
+    /** @var list<InstallRefused> Installs that were refused in the same run. */
+    public array $refusals = [];
+
     /**
      * @param  list<string>  $remaining  The objects that were left alone.
+     * @param  list<InstallRefused>  $refusals
      */
-    public static function leaving(array $remaining): self
+    public static function leaving(array $remaining, array $refusals = []): self
     {
-        return new self(sprintf(
+        $exception = new self(sprintf(
             'The sync could not take a lock in time and left %s alone. Everything else was installed; run model-search:sync again to finish.',
             implode(', ', $remaining),
         ));
+        $exception->refusals = $refusals;
+
+        return $exception;
     }
 }

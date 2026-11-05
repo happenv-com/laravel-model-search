@@ -10,7 +10,7 @@ use Happenv\ModelSearch\Postgres\Indexing\SearchIndexer;
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
-use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
 use Happenv\ModelSearch\Tests\TruncationTestCase;
 use Illuminate\Database\Events\MigrationsEnded;
 use Illuminate\Support\Facades\Artisan;
@@ -138,11 +138,50 @@ it('--check lists types that are not installed or whose fingerprint differs', fu
         ->and(Artisan::output())->toContain('fingerprint');
 });
 
-it('a new version of a definition is installed by the next sync', function (): void {
+it('a new version of a definition is installed by the next sync and asks for a rebuild', function (): void {
     iwSync()->apply();
-    $registry = app(ModelSearchRegistry::class);
-    $state = new IndexState;
+    DB::table(iwState())->update(['rebuild_cursor' => null, 'rebuild_started_at' => null, 'ready_at' => now()]);
+    $before = (new IndexState)->find('order');
 
-    expect($state->find('order')['definition_version'])->toBe(1)
-        ->and($registry->for(Order::class)->version)->toBe(1);
+    ConfigurableOrderSearch::$definitionVersion = 2;
+    $registry = new ModelSearchRegistry;
+    $registry->register(ConfigurableOrderSearch::class);
+
+    try {
+        $outcome = (new SchemaSync($registry))->apply();
+    } finally {
+        ConfigurableOrderSearch::reset();
+    }
+
+    $after = (new IndexState)->find('order');
+
+    expect($outcome->installs)->toBe(['order' => 'updated'])
+        ->and($before['definition_version'])->toBe(1)
+        ->and($after['definition_version'])->toBe(2)
+        ->and($after['definition_fingerprint'])->not->toBe($before['definition_fingerprint'])
+        ->and($after['rebuild_cursor'])->toBe('')
+        ->and($after['ready_at'])->not->toBeNull();
+});
+
+it('hands the refusals to the incomplete-sync exception and the listener logs them', function (): void {
+    DB::table(iwState())->insert(['subject_type' => 'order', 'definition_fingerprint' => 'other', 'definition_version' => 5, 'installed_at' => now()]);
+    iwSync()->apply();
+    DB::statement('DROP TRIGGER model_search_parcels_ins ON parcels');
+
+    config(['database.connections.second' => config('database.connections.pgsql')]);
+    $other = DB::connection('second');
+    $other->beginTransaction();
+    $other->getPdo()->exec('LOCK TABLE parcels IN ACCESS EXCLUSIVE MODE');
+
+    try {
+        try {
+            (new SchemaSync(app(ModelSearchRegistry::class), null, '100ms', 1, 10))->apply();
+            $this->fail('A locked table must make the sync report an incomplete run.');
+        } catch (SchemaSyncIncomplete $incomplete) {
+            expect($incomplete->refusals)->toHaveCount(1)
+                ->and($incomplete->refusals[0]->isDowngrade)->toBeTrue();
+        }
+    } finally {
+        $other->rollBack();
+    }
 });

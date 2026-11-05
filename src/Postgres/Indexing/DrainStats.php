@@ -48,6 +48,12 @@ final class DrainStats
     /** Records that kept failing and went to the failures table. */
     public int $poisoned = 0;
 
+    /** Aged log rows that an unowned type reads: applied for the owned types, rebuild flagged for the rest, deleted. */
+    public int $handedOffRows = 0;
+
+    /** @var list<string> Types whose rebuild this drain flagged on behalf of their owner. */
+    public array $flaggedTypes = [];
+
     /** Log rows discarded because their root type was switched to a rebuild. */
     public int $logRowsDiscarded = 0;
 
@@ -86,6 +92,11 @@ final class DrainStats
         $this->keyStageRewrites += $other->keyStageRewrites;
         $this->poisoned += $other->poisoned;
         $this->logRowsDiscarded += $other->logRowsDiscarded;
+        $this->handedOffRows += $other->handedOffRows;
+
+        foreach ($other->flaggedTypes as $type) {
+            $this->flaggedTypes[] = $type;
+        }
         $this->lockedOut = $this->lockedOut || $other->lockedOut;
 
         foreach ($other->switchedTypes as $type) {

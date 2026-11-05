@@ -34,7 +34,15 @@ final readonly class SyncAfterMigrations
             return;
         }
 
-        $outcome = $this->sync->apply();
+        try {
+            $outcome = $this->sync->apply();
+        } catch (SchemaSyncIncomplete $incomplete) {
+            foreach ($incomplete->refusals as $refusal) {
+                Log::warning($refusal->getMessage());
+            }
+
+            throw $incomplete;
+        }
 
         foreach ($outcome->refusals as $refusal) {
             // A downgrade is the previous release running `migrate` during a blue/green deploy: it
