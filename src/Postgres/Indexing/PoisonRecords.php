@@ -28,6 +28,9 @@ final readonly class PoisonRecords
     /** SQLSTATEs that say the database, not the record, was the problem: the batch must be retried, not the record blamed. */
     private const array TRANSIENT_STATES = ['40001', '40P01', '55P03', '57014', '57P01', '57P02', '57P03', '08000', '08001', '08003', '08004', '08006'];
 
+    /** The one definition of "due for a retry": a known type, attempts left, and the retry window passed since the last failure. */
+    private const string DUE = '"subject_type" = ANY(?::text[]) AND "attempts" < '.self::MAX_AUTOMATIC_ATTEMPTS.' AND "last_failed_at" < clock_timestamp() - interval \''.self::RETRY_AFTER_HOURS.' hours\'';
+
     public function __construct(private TableNames $names) {}
 
     /**
@@ -114,14 +117,27 @@ final readonly class PoisonRecords
 
         return $db->affectingStatement(
             sprintf(
-                'WITH "due" AS (UPDATE %1$s SET "last_failed_at" = clock_timestamp() WHERE "subject_type" = ANY(?::text[]) AND "attempts" < %2$d AND "last_failed_at" < clock_timestamp() - interval \'%3$d hours\' RETURNING "subject_type", "subject_id") INSERT INTO %4$s ("node_type", "node_id") SELECT "subject_type", "subject_id" FROM "due"',
+                'WITH "due" AS (UPDATE %1$s SET "last_failed_at" = clock_timestamp() WHERE %2$s RETURNING "subject_type", "subject_id") INSERT INTO %3$s ("node_type", "node_id") SELECT "subject_type", "subject_id" FROM "due"',
                 $this->table(),
-                self::MAX_AUTOMATIC_ATTEMPTS,
-                self::RETRY_AFTER_HOURS,
+                self::DUE,
                 $this->names->quoted($this->names->changes()),
             ),
             [Sql::arrayLiteral($knownTypes)],
         );
+    }
+
+    /**
+     * Whether any failure of the known types is due for a retry (the condition of {@see self::requeueDue()}), without changing anything.
+     *
+     * @param  list<string>  $knownTypes
+     */
+    public function hasDue(Connection $db, array $knownTypes): bool
+    {
+        if ($knownTypes === []) {
+            return false;
+        }
+
+        return $db->selectOne(sprintf('SELECT EXISTS (SELECT 1 FROM %s WHERE %s) AS "due"', $this->table(), self::DUE), [Sql::arrayLiteral($knownTypes)])?->due === true;
     }
 
     private function table(): string

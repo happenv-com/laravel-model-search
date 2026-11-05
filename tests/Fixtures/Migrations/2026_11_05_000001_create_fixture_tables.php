@@ -136,6 +136,7 @@ return new class extends Migration
         Schema::create('coded_items', function (Blueprint $table): void {
             $table->id();
             $table->text('label')->nullable();
+            $table->uuid('order_id')->nullable();
             $table->jsonb('codes')->nullable();
             $table->json('raw_codes')->nullable();
             $table->text('plain')->nullable();

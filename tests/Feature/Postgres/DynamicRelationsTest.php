@@ -10,11 +10,13 @@ use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Address;
+use Happenv\ModelSearch\Tests\Fixtures\Models\CodedItem;
 use Happenv\ModelSearch\Tests\Fixtures\Models\DynamicInvoice;
 use Happenv\ModelSearch\Tests\Fixtures\Models\DynamicOrder;
 use Happenv\ModelSearch\Tests\Fixtures\Models\MarketOrder;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\DynamicInvoiceSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\DynamicOrderListSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\DynamicOrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Illuminate\Database\Eloquent\Relations\HasOne;
@@ -29,6 +31,8 @@ beforeEach(function (): void {
     DynamicOrder::resolveRelationUsing('dynamicSubject', static fn (DynamicOrder $order) => $order->morphTo('subject'));
     DynamicOrder::resolveRelationUsing('brokenRelation', static fn (): string => 'not a relation');
     DynamicOrder::resolveRelationUsing('parcels', static fn (DynamicOrder $order) => $order->belongsTo(Address::class, 'billing_address_id'));
+    DynamicOrder::resolveRelationUsing('codedItem', static fn (DynamicOrder $order) => $order->hasOne(CodedItem::class, 'order_id'));
+    Order::resolveRelationUsing('inheritedChild', static fn (Order $order) => $order->hasOne(MarketOrder::class, 'order_id'));
     DynamicInvoice::resolveRelationUsing('dynamicOrder', static fn (DynamicInvoice $invoice) => $invoice->belongsTo(Order::class, 'order_id'));
 });
 
@@ -53,11 +57,11 @@ function drUse(array $definitions): void
 /**
  * @return list<string>
  */
-function drOrders(string $phrase): array
+function drOrders(string $phrase, string $search = DynamicOrderSearch::class): array
 {
     return array_map(
         static fn ($result): string => $result->model->signature,
-        iterator_to_array(DynamicOrderSearch::query($phrase)->within(DynamicOrder::query())->get()),
+        iterator_to_array($search::query($phrase)->within(DynamicOrder::query())->get()),
     );
 }
 
@@ -73,7 +77,14 @@ describe('the shared rule', function (): void {
             ->and(RelationNames::find($order, 'nothingHere'))->toBeNull();
     });
 
-    it('does not see a resolver registered on a sibling class', function (): void {
+    it('sees a resolver registered on a parent class from the child class', function (): void {
+        $path = new PathCompiler()->compile(DynamicOrder::class, 'inheritedChild.market_order_number');
+
+        expect(RelationNames::exists(new DynamicOrder, 'inheritedChild'))->toBeTrue()
+            ->and($path->tables()[0]->table)->toBe('market_orders');
+    });
+
+    it('does not see a resolver registered on a subclass from the parent class', function (): void {
         expect(RelationNames::exists(new Order, 'dynamicChild'))->toBeFalse();
     });
 });
@@ -160,5 +171,42 @@ describe('searching through a registered relation', function (): void {
         $results = DynamicInvoiceSearch::query('PAR-2')->within(DynamicInvoice::query(), [Order::class => Order::query()])->get();
 
         expect(array_map(static fn ($result): string => $result->model->number, iterator_to_array($results)))->toBe(['FV-D3']);
+    });
+
+    it('re-indexes the parent when the registered child is deleted', function (): void {
+        drUse([DynamicOrderSearch::class]);
+        $order = DynamicOrder::create(['signature' => 'DYN-3']);
+        $child = MarketOrder::create(['order_id' => $order->id, 'market_order_number' => 'MO-7300']);
+        msIndex();
+
+        expect(drOrders('MO-7300'))->toBe(['DYN-3']);
+
+        $child->delete();
+        msIndex();
+
+        expect(drOrders('MO-7300'))->toBe([]);
+    });
+
+    it('captures a change of a list column on the registered child and follows its elements', function (): void {
+        drUse([DynamicOrderListSearch::class]);
+        $order = DynamicOrder::create(['signature' => 'DYN-4']);
+        $item = CodedItem::create(['order_id' => $order->id, 'codes' => ['AAA-111', 'BBB-222', 'CCC-333']]);
+        msIndex();
+
+        expect(drOrders('BBB-222', DynamicOrderListSearch::class))->toBe(['DYN-4']);
+
+        DB::table('coded_items')->where('id', $item->id)->update(['codes' => json_encode(['AAA-111', 'CCC-333'])]);
+
+        expect(DB::table(TableNames::forConnection()->changes())->count())->toBeGreaterThan(0);
+
+        msIndex();
+
+        expect(drOrders('BBB-222', DynamicOrderListSearch::class))->toBe([])
+            ->and(drOrders('CCC-333', DynamicOrderListSearch::class))->toBe(['DYN-4']);
+
+        DB::table('coded_items')->where('id', $item->id)->delete();
+        msIndex();
+
+        expect(drOrders('CCC-333', DynamicOrderListSearch::class))->toBe([]);
     });
 });

@@ -109,9 +109,11 @@ describe('postgres driver', function (): void {
         ekUse();
         $empty = ekItem('empty', []);
         $null = ekItem('null', null);
+        $filled = ekItem('filled', ['F-1']);
         msIndex();
 
-        expect(ekKeys($empty))->toBe([])
+        expect(ekKeys($filled))->toBe(['f1'])
+            ->and(ekKeys($empty))->toBe([])
             ->and(ekKeys($null))->toBe([]);
     });
 
@@ -138,6 +140,18 @@ describe('postgres driver', function (): void {
         msIndex();
 
         expect(ekKeys($array))->toBe(['a1']);
+    });
+
+    it('applies revealUsing to a hit on any element', function (): void {
+        ekUse([SearchField::key('codes')->each()->revealUsing(static fn ($item): bool => $item->label === 'open')]);
+        ekItem('open', ['AAA-111', 'BBB-222']);
+        ekItem('closed', ['CCC-333', 'DDD-444']);
+        msIndex();
+
+        $value = static fn (string $phrase): mixed => iterator_to_array(CodedItemSearch::query($phrase)->within(CodedItem::query())->get())[0]->match->value;
+
+        expect($value('BBB-222'))->toBe('BBB-222')
+            ->and($value('DDD-444'))->toBeNull();
     });
 
     it('ignores the elements beyond the cap, in array order, and the cap is part of the fingerprint', function (): void {

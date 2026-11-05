@@ -15,4 +15,6 @@ final class CodedItem extends Model
     protected $table = 'coded_items';
 
     protected $guarded = [];
+
+    protected $casts = ['codes' => 'array'];
 }

@@ -90,9 +90,10 @@ final class Fingerprint
             'modes' => $modes,
             'via' => $via,
             'translatable' => $field->translatable,
-            'each' => $field->each,
             'normalizer' => self::normalizer($field),
             'contribution' => self::contribution($field),
+            // Only present when true: a definition installed before each() existed keeps its fingerprint.
+            ...($field->each ? ['each' => true] : []),
         ];
     }
 
