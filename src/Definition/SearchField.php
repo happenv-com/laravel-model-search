@@ -192,6 +192,10 @@ final class SearchField
 
     public function weight(int $weight): self
     {
+        if ($weight < 0) {
+            throw new InvalidSearchDefinition(sprintf('The weight of "%s" may not be negative.', $this->path));
+        }
+
         $this->weight = $weight;
 
         return $this;
@@ -209,6 +213,13 @@ final class SearchField
 
     public function toCompiled(bool $declaredByExtension): CompiledField
     {
+        if ($this->exactOnSource && ! in_array(Mode::Exact, $this->modes, true)) {
+            throw new InvalidSearchDefinition(sprintf(
+                'Field "%s" reads the source column for exact matches but does not match Mode::Exact; add Mode::Exact to matches() or drop exactOnSource().',
+                $this->path,
+            ));
+        }
+
         return new CompiledField(
             type: $this->type,
             path: $this->path,

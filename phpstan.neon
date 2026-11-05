@@ -2,9 +2,4 @@ parameters:
     level: 8
     paths:
         - src
-    ignoreErrors:
-        -
-            # A library trait for host module providers; PHPStan only analyses a trait through a using
-            # class and the package has none. It is exercised by tests/Feature/Integration/TrueModular.
-            identifier: trait.unused
-            path: src/Integration/TrueModular/RegistersModelSearches.php
+        - phpstan/Consumers

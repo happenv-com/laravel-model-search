@@ -43,6 +43,22 @@ final class StageConstraintInspector
 
     private function inspectQuery(QueryBuilder $query, string $table, SearchStage $stage): void
     {
+        if ($query->from !== $table) {
+            throw $this->refusal($stage, sprintf('it reads from something other than the model\'s own table "%s"', $table));
+        }
+
+        if ($query->havings !== null && $query->havings !== []) {
+            throw $this->refusal($stage, 'it uses a having clause, but a stage is a filter');
+        }
+
+        if ($query->limit !== null) {
+            throw $this->refusal($stage, 'it sets a limit, but a stage is a filter');
+        }
+
+        if ($query->offset !== null) {
+            throw $this->refusal($stage, 'it sets an offset, but a stage is a filter');
+        }
+
         if ($query->joins !== null && $query->joins !== []) {
             throw $this->refusal($stage, 'it joins another table');
         }
@@ -69,6 +85,8 @@ final class StageConstraintInspector
                 case 'Exists':
                 case 'NotExists':
                 case 'Sub':
+                case 'InSub':
+                case 'NotInSub':
                     throw $this->refusal($stage, 'it uses a subquery, which reads another table');
                 case 'raw':
                 case 'Raw':
@@ -79,6 +97,33 @@ final class StageConstraintInspector
                     }
 
                     $this->guardColumn($where['column'], $table, $stage);
+                    $this->guardValues($where, $stage);
+            }
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $where
+     */
+    private function guardValues(array $where, SearchStage $stage): void
+    {
+        $candidates = [];
+
+        if (array_key_exists('value', $where)) {
+            $candidates[] = $where['value'];
+        }
+
+        if (array_key_exists('values', $where)) {
+            $values = $where['values'];
+
+            foreach (is_array($values) ? $values : [$values] as $value) {
+                $candidates[] = $value;
+            }
+        }
+
+        foreach ($candidates as $candidate) {
+            if ($candidate instanceof Expression || $candidate instanceof QueryBuilder || $candidate instanceof EloquentBuilder) {
+                throw $this->refusal($stage, 'it compares against an expression or subquery, which can read another table');
             }
         }
     }

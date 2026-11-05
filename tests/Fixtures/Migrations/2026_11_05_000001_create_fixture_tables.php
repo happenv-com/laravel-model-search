@@ -36,6 +36,7 @@ return new class extends Migration
             $table->uuid('order_id');
             $table->text('market_order_number');
             $table->timestampsTz(6);
+            $table->index('order_id');
         });
 
         Schema::create('parcels', function (Blueprint $table): void {
@@ -43,6 +44,7 @@ return new class extends Migration
             $table->uuid('order_id')->nullable();
             $table->text('reference')->nullable();
             $table->timestampsTz(6);
+            $table->index('order_id');
         });
 
         Schema::create('carrier_units', function (Blueprint $table): void {
@@ -50,6 +52,7 @@ return new class extends Migration
             $table->uuid('parcel_id');
             $table->text('tracking_number')->nullable();
             $table->timestampsTz(6);
+            $table->index('parcel_id');
         });
 
         Schema::create('products', function (Blueprint $table): void {
@@ -67,6 +70,7 @@ return new class extends Migration
             $table->text('external_reference')->nullable();
             $table->uuid('order_id')->nullable();
             $table->timestampsTz(6);
+            $table->index('order_id');
         });
 
         Schema::create('customers', function (Blueprint $table): void {

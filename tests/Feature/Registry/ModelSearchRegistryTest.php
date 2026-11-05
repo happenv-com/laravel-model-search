@@ -26,6 +26,7 @@ use Happenv\ModelSearch\Tests\Fixtures\Models\Product;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\MarketOrderSearchExtension;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\StageProbeSearch;
+use Illuminate\Support\Facades\DB;
 
 covers(ModelSearchRegistry::class);
 
@@ -192,27 +193,36 @@ it('rejects a definition without fields', function (): void {
     $registry->for(Order::class);
 })->throws(InvalidSearchDefinition::class, 'no fields');
 
-it('rejects stage constraints touching another table or undeclared columns', function (Closure $constraint, array $watching): void {
+it('rejects stage constraints touching another table or undeclared columns', function (Closure $constraint, array $watching, string $fragment): void {
     StageProbeSearch::$constraint = $constraint;
     StageProbeSearch::$watching = $watching;
 
     try {
         $registry = new ModelSearchRegistry;
         $registry->register(StageProbeSearch::class);
-        $registry->for(Order::class);
+
+        expect(static fn () => $registry->for(Order::class))->toThrow(InvalidStageConstraint::class, $fragment);
     } finally {
         StageProbeSearch::$constraint = null;
         StageProbeSearch::$watching = [];
     }
 })->with([
-    'undeclared column' => [static fn (OrderBuilder $q) => $q->where('state', 'unshipped'), []],
-    'another column undeclared' => [static fn (OrderBuilder $q) => $q->where('state', 'unshipped')->where('customer_email', 'x'), ['state']],
-    'other table column' => [static fn (OrderBuilder $q) => $q->where('parcels.reference', 'x'), ['reference']],
-    'relation existence' => [static fn (OrderBuilder $q) => $q->whereHas('parcels'), ['state']],
-    'join' => [static fn (OrderBuilder $q) => $q->join('parcels', 'parcels.order_id', '=', 'orders.id'), ['state']],
-    'raw sql' => [static fn (OrderBuilder $q) => $q->whereRaw('state = ?', ['x']), ['state']],
-    'nested undeclared' => [static fn (OrderBuilder $q) => $q->where(static fn ($n) => $n->where('state', 'a')->orWhere('signature', 'b')), ['state']],
-])->throws(InvalidStageConstraint::class);
+    'undeclared column' => [static fn (OrderBuilder $q) => $q->where('state', 'unshipped'), [], 'not declared'],
+    'another column undeclared' => [static fn (OrderBuilder $q) => $q->where('state', 'unshipped')->where('customer_email', 'x'), ['state'], '"customer_email" is not declared'],
+    'other table column' => [static fn (OrderBuilder $q) => $q->where('parcels.reference', 'x'), ['reference'], 'not the model\'s own table'],
+    'relation existence' => [static fn (OrderBuilder $q) => $q->whereHas('parcels'), ['state'], 'subquery'],
+    'join' => [static fn (OrderBuilder $q) => $q->join('parcels', 'parcels.order_id', '=', 'orders.id'), ['state'], 'joins'],
+    'raw sql' => [static fn (OrderBuilder $q) => $q->whereRaw('state = ?', ['x']), ['state'], 'raw SQL'],
+    'nested undeclared' => [static fn (OrderBuilder $q) => $q->where(static fn ($n) => $n->where('state', 'a')->orWhere('signature', 'b')), ['state'], '"signature" is not declared'],
+    'whereIn subquery' => [static fn (OrderBuilder $q) => $q->whereIn('state', Parcel::query()->select('reference')), ['state'], 'another table'],
+    'whereIn raw expression' => [static fn (OrderBuilder $q) => $q->whereIn('state', [DB::raw('(select reference from parcels)')]), ['state'], 'another table'],
+    'basic raw subquery value' => [static fn (OrderBuilder $q) => $q->where('state', '=', DB::raw('(select reference from parcels limit 1)')), ['state'], 'another table'],
+    'basic eloquent builder value' => [static fn (OrderBuilder $q) => $q->where('state', '=', Parcel::query()->select('reference')->limit(1)), ['state'], 'another table'],
+    'other from' => [static fn (OrderBuilder $q) => $q->from('parcels')->where('state', 'a'), ['state'], 'reads from'],
+    'having' => [static fn (OrderBuilder $q) => $q->where('state', 'a')->groupBy('state')->having('state', '=', 'a'), ['state'], 'having'],
+    'limit' => [static fn (OrderBuilder $q) => $q->where('state', 'a')->limit(10), ['state'], 'limit'],
+    'offset' => [static fn (OrderBuilder $q) => $q->where('state', 'a')->offset(10), ['state'], 'offset'],
+]);
 
 it('accepts a stage constraint over declared columns of the own table', function (): void {
     $registry = new ModelSearchRegistry;
@@ -226,8 +236,8 @@ it('accepts a stage constraint over declared columns of the own table', function
         public function stages(): array
         {
             return [
-                SearchStage::make('open', static fn (OrderBuilder $q) => $q->where(static fn ($n) => $n->where('orders.state', 'a')->orWhereNull('shipped_at')))
-                    ->watching(['state', 'shipped_at']),
+                SearchStage::make('open', static fn (OrderBuilder $q) => $q->where(static fn ($n) => $n->where('orders.state', 'a')->orWhereNull('customer_email')))
+                    ->watching(['state', 'customer_email']),
             ];
         }
     }::class);

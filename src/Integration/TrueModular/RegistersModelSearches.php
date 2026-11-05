@@ -16,7 +16,10 @@ use Illuminate\Support\ServiceProvider;
  *     $this->hasModelSearches([OrderSearch::class])
  *         ->hasModelSearchExtensions([MarketOrderSearchExtension::class]);
  *
- * Call {@see self::processModelSearches()} from the provider's initialization hook.
+ * Two steps are required: the fluent `has…` calls only collect the classes (call them while the
+ * provider registers or configures), and {@see self::processModelSearches()} hands them to the
+ * registry. Call it from the provider's initialization hook (`moduleInitialized()` in
+ * laravel-true-modular), after the container is ready; without it nothing is registered.
  *
  * @phpstan-require-extends ServiceProvider
  */

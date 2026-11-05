@@ -106,3 +106,16 @@ it('carries every modifier into the compiled field', function (): void {
         ->and($compiled->declaredByExtension)->toBeTrue()
         ->and(SearchField::via('order', ['signature'])->toCompiled(false)->via)->toBe(['signature']);
 });
+
+it('rejects exactOnSource on a field whose modes do not include exact', function (): void {
+    expect(static fn () => SearchField::key('number')->matches(Mode::Prefix)->exactOnSource()->toCompiled(false))
+        ->toThrow(InvalidSearchDefinition::class, 'Mode::Exact')
+        ->and(static fn () => SearchField::key('number')->exactOnSource()->matches(Mode::Suffix)->toCompiled(false))
+        ->toThrow(InvalidSearchDefinition::class, 'Mode::Exact')
+        ->and(SearchField::key('number')->exactOnSource()->matches(Mode::Exact)->toCompiled(false)->exactOnSource)->toBeTrue();
+});
+
+it('rejects a negative weight and allows zero', function (): void {
+    expect(static fn () => SearchField::key('number')->weight(-1))->toThrow(InvalidSearchDefinition::class, 'negative')
+        ->and(SearchField::key('number')->weight(0)->toCompiled(false)->weight)->toBe(0);
+});
