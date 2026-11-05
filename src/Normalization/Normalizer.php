@@ -16,7 +16,7 @@ namespace Happenv\ModelSearch\Normalization;
  */
 interface Normalizer
 {
-    public function normalize(string $value): string;
+    public function normalize(#[\SensitiveParameter] string $value): string;
 
     public function version(): int;
 }

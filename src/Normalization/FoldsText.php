@@ -13,7 +13,7 @@ use Normalizer as IntlNormalizer;
  */
 abstract class FoldsText implements Normalizer
 {
-    final protected static function fold(string $value, string $locale = 'en'): string
+    final protected static function fold(#[\SensitiveParameter] string $value, string $locale = 'en'): string
     {
         $composed = IntlNormalizer::normalize($value, IntlNormalizer::FORM_KC);
         $composed = is_string($composed) ? $composed : $value;
@@ -25,7 +25,7 @@ abstract class FoldsText implements Normalizer
     /**
      * NFKC and lower case only: the form in which a phrase is classified.
      */
-    final protected static function foldUnicode(string $value): string
+    final protected static function foldUnicode(#[\SensitiveParameter] string $value): string
     {
         $composed = IntlNormalizer::normalize($value, IntlNormalizer::FORM_KC);
 

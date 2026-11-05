@@ -11,7 +11,7 @@ namespace Happenv\ModelSearch\Normalization;
  */
 final class NameNormalizer extends FoldsText
 {
-    public function normalize(string $value): string
+    public function normalize(#[\SensitiveParameter] string $value): string
     {
         return $this->tidy(self::fold($value));
     }
@@ -19,7 +19,7 @@ final class NameNormalizer extends FoldsText
     /**
      * Query-side only: the name form under a locale-specific transliteration.
      */
-    public function transliterated(string $value, string $locale): string
+    public function transliterated(#[\SensitiveParameter] string $value, string $locale): string
     {
         return $this->tidy(self::fold($value, $locale));
     }
@@ -27,7 +27,7 @@ final class NameNormalizer extends FoldsText
     /**
      * The NFKC, lower-cased form, before any transliteration or separator handling.
      */
-    public function unicodeFolded(string $value): string
+    public function unicodeFolded(#[\SensitiveParameter] string $value): string
     {
         return self::foldUnicode($value);
     }

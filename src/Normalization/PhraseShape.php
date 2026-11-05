@@ -13,7 +13,7 @@ final class PhraseShape
      * An identifier-like phrase contains `@`, or its alphanumeric characters are at least
      * `identifier_rule.digit_share` digits.
      */
-    public static function isIdentifierLike(string $q): bool
+    public static function isIdentifierLike(#[\SensitiveParameter] string $q): bool
     {
         $folded = (new NameNormalizer)->unicodeFolded($q);
 
@@ -39,7 +39,7 @@ final class PhraseShape
      *
      * @return list<string>
      */
-    public static function words(string $q): array
+    public static function words(#[\SensitiveParameter] string $q): array
     {
         $normalized = (new NameNormalizer)->normalize($q);
 

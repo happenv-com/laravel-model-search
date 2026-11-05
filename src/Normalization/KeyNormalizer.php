@@ -12,7 +12,7 @@ namespace Happenv\ModelSearch\Normalization;
  */
 final class KeyNormalizer extends FoldsText
 {
-    public function normalize(string $value): string
+    public function normalize(#[\SensitiveParameter] string $value): string
     {
         return (string) preg_replace('/[\s\-_.\/#+,:;]+/u', '', self::fold($value));
     }
@@ -20,7 +20,7 @@ final class KeyNormalizer extends FoldsText
     /**
      * Query-side only: the key form under a locale-specific transliteration.
      */
-    public function transliterated(string $value, string $locale): string
+    public function transliterated(#[\SensitiveParameter] string $value, string $locale): string
     {
         return (string) preg_replace('/[\s\-_.\/#+,:;]+/u', '', self::fold($value, $locale));
     }

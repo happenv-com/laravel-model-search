@@ -6,6 +6,7 @@ namespace Happenv\ModelSearch\Drivers;
 
 use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
+use Happenv\ModelSearch\Exceptions\SearchTooBroad;
 use Happenv\ModelSearch\Query\SearchQuery;
 use Happenv\ModelSearch\Query\SearchResults;
 use Illuminate\Database\Eloquent\Builder;
@@ -36,13 +37,17 @@ interface Driver
      * @return Builder<TModel>
      *
      * @throws SearchTimedOut
+     * @throws SearchTooBroad
      */
     public function apply(SearchQuery $query, Builder $tableQuery): Builder;
 
     /**
      * Raw candidates, with no scope applied and no model hydrated.
      *
+     *
      * @return Collection<int, array{type: string, id: string, mode: Mode, kind: string, value: string|null, stage: string|null}>
+     *
+     * @throws SearchTimedOut
      */
     public function candidates(SearchQuery $query): Collection;
 }

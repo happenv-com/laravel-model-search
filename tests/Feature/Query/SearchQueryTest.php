@@ -8,6 +8,7 @@ use Happenv\ModelSearch\Exceptions\PartitionMissing;
 use Happenv\ModelSearch\Exceptions\SearchFailed;
 use Happenv\ModelSearch\Exceptions\SearchScopeMissing;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
+use Happenv\ModelSearch\Exceptions\SearchTooBroad;
 use Happenv\ModelSearch\Exceptions\UnsupportedHostQuery;
 use Happenv\ModelSearch\Query\SearchQuery;
 use Happenv\ModelSearch\Query\SearchResult;
@@ -23,6 +24,8 @@ use Happenv\ModelSearch\Tests\Fixtures\Searches\CustomerSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\InvoiceSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ProductSearch;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Foundation\Auth\User;
 
 covers(SearchQuery::class);
 
@@ -358,13 +361,18 @@ describe('ranking', function (): void {
 describe('limit and scope', function (): void {
     it('limits to five by default and applies the limit after within()', function (): void {
         foreach (range(1, 8) as $i) {
-            Order::create(['signature' => 'ABC-'.$i, 'state' => $i <= 7 ? 'shipped' : 'unshipped']);
+            Order::create([
+                'signature' => 'ABC-'.$i,
+                'state' => $i <= 7 ? 'shipped' : 'unshipped',
+                'purchased_at' => $i === 8 ? now()->subYear() : now()->subDays(8 - $i),
+            ]);
         }
 
         $all = OrderSearch::query('ABC')->within(Order::query())->withoutStages()->get();
         $scoped = OrderSearch::query('ABC')->within(Order::query()->where('state', 'unshipped'))->withoutStages()->limit(1)->get();
 
         expect(iterator_to_array($all))->toHaveCount(5)
+            ->and(signaturesOf($all))->not->toContain('ABC-8')
             ->and(signaturesOf($scoped))->toBe(['ABC-8']);
     });
 
@@ -484,6 +492,16 @@ describe('stages', function (): void {
             ->and(iterator_to_array($results)[0]->match->stage)->toBeNull();
     });
 
+    it('reports the stage of stage zero even when the limit hides its non-exact hits', function (): void {
+        Order::create(['signature' => 'ABC', 'state' => 'shipped']);
+        Order::create(['signature' => 'ABC-2', 'state' => 'unshipped']);
+
+        $results = orderSearch('ABC')->limit(1)->get();
+
+        expect(signaturesOf($results))->toBe(['ABC'])
+            ->and($results->stage)->toBe('open');
+    });
+
     it('reports no stage for a definition without stages', function (): void {
         Customer::create(['name' => 'Kowalski', 'email' => 'k@example.com']);
 
@@ -529,12 +547,12 @@ describe('apply', function (): void {
     });
 
     it('keeps the phrase out of the table query', function (): void {
-        Order::create(['signature' => 'SECRETPHRASE-1']);
+        Order::create(['signature' => 'secretphrase-1']);
 
-        $table = orderSearch('SECRETPHRASE')->apply(Order::query());
+        $table = orderSearch('secretphrase')->apply(Order::query());
 
-        expect($table->toSql())->not->toContain('SECRETPHRASE')
-            ->and(json_encode($table->getBindings()))->not->toContain('SECRETPHRASE')
+        expect($table->toSql())->not->toContain('secretphrase')
+            ->and(json_encode($table->getBindings()))->not->toContain('secretphrase')
             ->and($table->count())->toBe(1);
     });
 
@@ -556,6 +574,54 @@ describe('apply', function (): void {
         expect($table->pluck('signature')->all())->toBe(['ABCD-2']);
     });
 
+    it('survives an orWhere in the table query', function (): void {
+        Order::create(['signature' => 'ABCD-1', 'state' => 'unshipped']);
+        Order::create(['signature' => 'ABCD-2', 'state' => 'shipped']);
+        Order::create(['signature' => 'ABCD-3', 'state' => 'cancelled', 'customer_email' => 'x']);
+        Order::create(['signature' => 'OTHER-1', 'state' => 'unshipped']);
+
+        $table = Order::query()->where('state', 'unshipped')->orWhere('state', 'shipped');
+        $found = orderSearch('ABCD')->apply($table)->pluck('signature')->sort()->values()->all();
+
+        expect($found)->toBe(['ABCD-1', 'ABCD-2']);
+    });
+
+    it('gives no rows, with pagination intact, when nothing matches', function (): void {
+        Order::create(['signature' => 'ABCD-1']);
+
+        $page = orderSearch('NOTHINGHERE')->apply(Order::query())->paginate(3);
+
+        expect($page->total())->toBe(0)->and($page->items())->toBe([]);
+    });
+
+    it('can be applied twice', function (): void {
+        Order::create(['signature' => 'ABCD-1', 'customer_email' => 'abcd@example.com']);
+        Order::create(['signature' => 'ABCD-2']);
+
+        $table = orderSearch('ABCD')->apply(Order::query());
+        $table = orderSearch('ABCD-1')->apply($table);
+
+        expect($table->pluck('signature')->all())->toBe(['ABCD-1']);
+    });
+
+    it('refuses a phrase that matches more than apply.max_ids records', function (): void {
+        config(['model-search.apply.max_ids' => 2]);
+        foreach (range(1, 3) as $i) {
+            Order::create(['signature' => 'ABCD-'.$i]);
+        }
+
+        try {
+            orderSearch('ABCD')->apply(Order::query());
+            $this->fail('Expected SearchTooBroad.');
+        } catch (SearchTooBroad $exception) {
+            expect(stripos($exception->getMessage(), 'abcd'))->toBeFalse();
+        }
+
+        expect(orderSearch('ABCD-1')->apply(Order::query())->count())->toBe(1);
+        config(['model-search.apply.max_ids' => 3]);
+        expect(orderSearch('ABCD')->apply(Order::query())->count())->toBe(3);
+    });
+
     it('rejects a table query of another model', function (): void {
         expect(fn () => orderSearch('ABCD')->apply(Customer::query()))->toThrow(InvalidArgumentException::class);
     });
@@ -575,6 +641,14 @@ describe('similar', function (): void {
             ->and(signaturesOf(orderSearch('kowalsky')->similar()))->toBe([])
             ->and(signaturesOf(orderSearch('ja ow')->similar()))->toBe([])
             ->and(signaturesOf(orderSearch('jan wal')->similar()))->toBe(['S-1']);
+    });
+
+    it('honours withoutStages()', function (): void {
+        Order::create(['signature' => 'S-1', 'customer_name' => 'Jan Kowalski']);
+
+        $results = orderSearch('kowal')->withoutStages()->similar();
+
+        expect(iterator_to_array($results)[0]->match->stage)->toBeNull();
     });
 
     it('looks in all stages and at names only', function (): void {
@@ -664,15 +738,15 @@ describe('time and privacy', function (): void {
     });
 
     it('throws SearchTimedOut from apply, without the phrase', function (): void {
-        Order::create(['signature' => 'SECRETPHRASE']);
+        Order::create(['signature' => 'secretphrase']);
         config(['model-search.search.timeout_ms' => 50]);
         $slow = Order::query()->whereRaw('pg_sleep(0.4) is not null');
 
         try {
-            OrderSearch::query('SECRETPHRASE')->within($slow)->apply(Order::query());
+            OrderSearch::query('secretphrase')->within($slow)->apply(Order::query());
             $this->fail('Expected a timeout.');
         } catch (SearchTimedOut $exception) {
-            expect($exception->getMessage())->not->toContain('SECRETPHRASE')
+            expect($exception->getMessage())->not->toContain('secretphrase')
                 ->and($exception->getPrevious())->toBeNull();
         }
     });
@@ -691,9 +765,9 @@ describe('time and privacy', function (): void {
     it('keeps the phrase out of the message of a database failure and drops the original', function (): void {
         $broken = Order::query()->whereRaw('no_such_column = 1');
         $failures = [
-            fn () => OrderSearch::query('SECRETPHRASE')->within($broken)->get(),
-            fn () => OrderSearch::query('SECRETPHRASE')->within($broken)->similar(),
-            fn () => OrderSearch::query('SECRETPHRASE')->within($broken)->apply(Order::query()),
+            fn () => OrderSearch::query('secretphrase')->within($broken)->get(),
+            fn () => OrderSearch::query('secretphrase')->within($broken)->similar(),
+            fn () => OrderSearch::query('secretphrase')->within($broken)->apply(Order::query()),
         ];
 
         foreach ($failures as $failure) {
@@ -701,7 +775,7 @@ describe('time and privacy', function (): void {
                 $failure();
                 $this->fail('Expected a failure.');
             } catch (SearchFailed $exception) {
-                expect($exception->getMessage())->not->toContain('SECRETPHRASE')
+                expect($exception->getMessage())->not->toContain('secretphrase')
                     ->and($exception->getPrevious())->toBeNull();
             }
         }
@@ -711,10 +785,10 @@ describe('time and privacy', function (): void {
         $messages = [];
 
         foreach ([
-            fn () => OrderSearch::query('SECRETPHRASE')->get(),
-            fn () => OrderSearch::query('SECRETPHRASE')->within(Order::query()->limit(1)),
-            fn () => OrderSearch::query('SECRETPHRASE')->withoutScope(' '),
-            fn () => OrderSearch::query('SECRETPHRASE')->limit(0),
+            fn () => OrderSearch::query('secretphrase')->get(),
+            fn () => OrderSearch::query('secretphrase')->within(Order::query()->limit(1)),
+            fn () => OrderSearch::query('secretphrase')->withoutScope(' '),
+            fn () => OrderSearch::query('secretphrase')->limit(0),
         ] as $attempt) {
             try {
                 $attempt();
@@ -724,6 +798,123 @@ describe('time and privacy', function (): void {
         }
 
         expect($messages)->toHaveCount(4)
-            ->and(implode(' ', $messages))->not->toContain('SECRETPHRASE');
+            ->and(implode(' ', $messages))->not->toContain('secretphrase');
+    });
+});
+
+describe('via', function (): void {
+    function invoiceSearch(string $phrase, ?Builder $parents = null): SearchQuery
+    {
+        return InvoiceSearch::query($phrase)->within(Invoice::query(), $parents === null ? [] : [Order::class => $parents]);
+    }
+
+    it('finds a record through a parent that is in the parent scope', function (): void {
+        $order = Order::create(['signature' => 'ORD-1']);
+        Invoice::create(['number' => 'FV-1', 'order_id' => $order->id]);
+        Invoice::create(['number' => 'FV-2']);
+
+        $results = invoiceSearch('ORD-1', Order::query())->get();
+        $match = iterator_to_array($results)[0]->match;
+
+        expect(array_map(static fn (SearchResult $r): string => $r->model->number, iterator_to_array($results)))->toBe(['FV-1'])
+            ->and($match->kind)->toBe('order')
+            ->and($match->via)->toBe('order')
+            ->and($match->mode)->toBe(Mode::Exact)
+            ->and($match->value)->toBe('ORD-1');
+    });
+
+    it('stays closed without a scope for the parent', function (): void {
+        $order = Order::create(['signature' => 'ORD-1']);
+        Invoice::create(['number' => 'FV-1', 'order_id' => $order->id]);
+
+        expect(iterator_to_array(invoiceSearch('ORD-1')->get()))->toBe([])
+            ->and(invoiceSearch('ORD-1')->apply(Invoice::query())->count())->toBe(0);
+    });
+
+    it('never surfaces a child through a parent outside the parent scope', function (): void {
+        $order = Order::create(['signature' => 'ORD-1', 'state' => 'unshipped']);
+        Invoice::create(['number' => 'FV-1', 'order_id' => $order->id]);
+
+        $results = invoiceSearch('ORD-1', Order::query()->where('state', 'shipped'))->get();
+
+        expect(iterator_to_array($results))->toBe([]);
+    });
+
+    it('follows only the kinds the via field names', function (): void {
+        $order = Order::create(['signature' => 'ORD-1', 'external_number' => 'EXT-9999']);
+        Invoice::create(['number' => 'FV-1', 'order_id' => $order->id]);
+
+        expect(iterator_to_array(invoiceSearch('EXT-9999', Order::query())->get()))->toBe([]);
+    });
+
+    it('reports a record found both directly and through a parent once, as direct', function (): void {
+        $order = Order::create(['signature' => 'ORD-1']);
+        Invoice::create(['number' => 'ORD-1', 'order_id' => $order->id]);
+
+        $results = iterator_to_array(invoiceSearch('ORD-1', Order::query())->get());
+
+        expect($results)->toHaveCount(1)
+            ->and($results[0]->match->via)->toBeNull()
+            ->and($results[0]->match->kind)->toBe('number');
+    });
+
+    it('ranks a hit through a parent below a direct hit of the same mode', function (): void {
+        $order = Order::create(['signature' => 'ORD-1']);
+        Invoice::create(['number' => 'FV-VIA', 'order_id' => $order->id]);
+        Invoice::create(['number' => 'ORD-1']);
+
+        $results = iterator_to_array(invoiceSearch('ORD-1', Order::query())->get());
+
+        expect(array_map(static fn (SearchResult $r): string => $r->model->number, $results))->toBe(['ORD-1', 'FV-VIA']);
+    });
+
+    it('is applied to a table too', function (): void {
+        $order = Order::create(['signature' => 'ORD-1']);
+        Invoice::create(['number' => 'FV-1', 'order_id' => $order->id]);
+        Invoice::create(['number' => 'FV-2']);
+
+        expect(invoiceSearch('ORD-1', Order::query())->apply(Invoice::query())->pluck('number')->all())->toBe(['FV-1']);
+    });
+
+    it('rejects a parent scope for the wrong model', function (): void {
+        expect(fn () => InvoiceSearch::query('x')->within(Invoice::query(), [Order::class => Customer::query()]))->toThrow(UnsupportedHostQuery::class)
+            ->and(fn () => InvoiceSearch::query('x')->within(Invoice::query(), [Order::class => Order::query()->limit(1)]))->toThrow(UnsupportedHostQuery::class)
+            ->and(fn () => InvoiceSearch::query('x')->within(Invoice::query(), ['NotAModel' => Order::query()]))->toThrow(UnsupportedHostQuery::class);
+    });
+
+    it('does not use the parent scope of a withoutScope() search', function (): void {
+        $order = Order::create(['signature' => 'ORD-1']);
+        Invoice::create(['number' => 'FV-1', 'order_id' => $order->id]);
+
+        $query = InvoiceSearch::query('ORD-1')->within(Invoice::query(), [Order::class => Order::query()])->withoutScope('system job');
+
+        expect(iterator_to_array($query->get()))->toBe([]);
+    });
+});
+
+describe('viewer', function (): void {
+    function viewerWithId(int $id): User
+    {
+        $user = new User;
+        $user->forceFill(['id' => $id]);
+
+        return $user;
+    }
+
+    it('lets forUser() decide the reveal even when another user is authenticated', function (): void {
+        useOrderFields([
+            SearchField::key('customer_email')->revealUsing(static fn ($order, $viewer): bool => $viewer?->getAuthIdentifier() === 7),
+        ]);
+        Order::create(['signature' => 'S-1', 'customer_email' => 'a@example.com']);
+        $this->actingAs(viewerWithId(1));
+        $value = static fn (SearchQuery $query): ?string => iterator_to_array($query->get())[0]->match->value;
+        $base = static fn (): SearchQuery => ConfigurableOrderSearch::query('a@example.com')->within(Order::query());
+
+        expect($value($base()))->toBeNull()
+            ->and($value($base()->forUser(viewerWithId(7))))->toBe('a@example.com')
+            ->and($value($base()->forUser(null)))->toBeNull();
+        $this->actingAs(viewerWithId(7));
+        expect($value($base()))->toBe('a@example.com')
+            ->and($value($base()->forUser(viewerWithId(2))))->toBeNull();
     });
 });

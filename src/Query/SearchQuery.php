@@ -11,11 +11,14 @@ use Happenv\ModelSearch\Drivers\Driver;
 use Happenv\ModelSearch\Drivers\DriverManager;
 use Happenv\ModelSearch\Exceptions\PartitionMissing;
 use Happenv\ModelSearch\Exceptions\SearchScopeMissing;
+use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Exceptions\UnsupportedHostQuery;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Auth;
 use InvalidArgumentException;
 
 /**
@@ -36,6 +39,13 @@ final class SearchQuery
     private array $modes = [];
 
     private ?HostQuery $host = null;
+
+    /** @var array<class-string<Model>, HostQuery> */
+    private array $parents = [];
+
+    private ?Authenticatable $viewer = null;
+
+    private bool $viewerGiven = false;
 
     private ?string $unscopedReason = null;
 
@@ -59,19 +69,44 @@ final class SearchQuery
     /**
      * Limits the search to what the viewer may see: the host's own query of the model.
      *
+     * A `via` field reaches a parent record only through the parent's own scope, given here by the
+     * parent model class. Without one, that `via` field finds nothing.
+     *
      * @param  Builder<Model>  $host
+     * @param  array<class-string<Model>, Builder<Model>>  $via
      */
-    public function within(Builder $host): self
+    public function within(Builder $host, array $via = []): self
     {
         if (! $host->getModel() instanceof $this->modelClass) {
             throw new UnsupportedHostQuery(sprintf('The host query is for %s, but this search is for %s.', $host->getModel()::class, $this->modelClass));
         }
 
         $scope = HostQuery::from($host);
+        $parents = [];
 
-        return $this->evolve(function (self $query) use ($scope): void {
+        foreach ($via as $parentClass => $parentHost) {
+            if (! is_subclass_of($parentClass, Model::class) || ! $parentHost->getModel() instanceof $parentClass) {
+                throw new UnsupportedHostQuery('A parent scope must be a query of the model it is registered for.');
+            }
+
+            $parents[$parentClass] = HostQuery::from($parentHost);
+        }
+
+        return $this->evolve(function (self $query) use ($scope, $parents): void {
             $query->host = $scope;
+            $query->parents = $parents;
             $query->unscopedReason = null;
+        });
+    }
+
+    /**
+     * The viewer that `revealUsing()` rules see. Without this call it is the authenticated user.
+     */
+    public function forUser(?Authenticatable $viewer): self
+    {
+        return $this->evolve(function (self $query) use ($viewer): void {
+            $query->viewer = $viewer;
+            $query->viewerGiven = true;
         });
     }
 
@@ -86,6 +121,7 @@ final class SearchQuery
 
         return $this->evolve(function (self $query) use ($reason): void {
             $query->host = null;
+            $query->parents = [];
             $query->unscopedReason = $reason;
         });
     }
@@ -196,7 +232,10 @@ final class SearchQuery
     /**
      * Raw candidates: no scope, no authorization, no hydration. Only available after withoutScope().
      *
+     *
      * @return Collection<int, array{type: string, id: string, mode: Mode, kind: string, value: string|null, stage: string|null}>
+     *
+     * @throws SearchTimedOut
      */
     public function candidates(): Collection
     {
@@ -267,6 +306,32 @@ final class SearchQuery
     public function maxResults(): int
     {
         return $this->limit;
+    }
+
+    /**
+     * The scope of a parent model for `via` fields; null keeps those fields closed.
+     *
+     * @internal
+     *
+     * @param  class-string<Model>  $parentClass
+     */
+    public function parentScope(string $parentClass): ?HostQuery
+    {
+        return $this->parents[$parentClass] ?? null;
+    }
+
+    /**
+     * @internal
+     */
+    public function viewer(): ?Authenticatable
+    {
+        if ($this->viewerGiven) {
+            return $this->viewer;
+        }
+
+        $user = Auth::user();
+
+        return $user instanceof Authenticatable ? $user : null;
     }
 
     /**

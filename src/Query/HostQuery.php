@@ -14,7 +14,8 @@ use Illuminate\Support\Collection;
  * The query a host application scopes a search with (what the viewer may see), as it is embedded
  * in a search statement.
  *
- * Only `from`, joins, conditions and global scopes are accepted: wrapped in a join, a limit, an
+ * Only `from`, joins, conditions and global scopes are accepted (and a select of exactly `<table>.*`, which
+ * joined hosts use to keep the model's own columns): wrapped in a join, a limit, an
  * ordering, a grouping, a union or a custom select would mean something else. The host builder is
  * never mutated; every use is a clone.
  */
@@ -33,7 +34,7 @@ final readonly class HostQuery
      */
     public static function from(Builder $builder): self
     {
-        self::guard($builder->clone()->applyScopes()->getQuery());
+        self::guard($builder->clone()->applyScopes()->getQuery(), $builder->getModel());
 
         return new self($builder->clone());
     }
@@ -72,7 +73,16 @@ final readonly class HostQuery
             return new Collection;
         }
 
-        $models = $this->builder->clone()->whereKey($ids)->get()->keyBy(static fn (Model $model): string => (string) $model->getKey());
+        $builder = $this->builder->clone();
+        $model = $builder->getModel();
+        $query = $builder->applyScopes()->getQuery();
+
+        if (($query->joins ?? []) !== [] && ($query->columns === null || $query->columns === ['*'])) {
+            // A joined host would otherwise return the columns of every joined table, last one winning.
+            $builder->select($model->getTable().'.*');
+        }
+
+        $models = $builder->whereKey($ids)->get()->keyBy(static fn (Model $model): string => (string) $model->getKey());
         $ordered = new Collection;
 
         foreach ($ids as $id) {
@@ -86,7 +96,7 @@ final readonly class HostQuery
         return $ordered;
     }
 
-    private static function guard(QueryBuilder $query): void
+    private static function guard(QueryBuilder $query, Model $model): void
     {
         $offending = match (true) {
             $query->limit !== null => 'limit()',
@@ -97,7 +107,7 @@ final readonly class HostQuery
             $query->unions !== null && $query->unions !== [] => 'union()',
             $query->aggregate !== null => 'an aggregate',
             $query->lock !== null => 'a lock',
-            $query->columns !== null && $query->columns !== ['*'] => 'a custom select',
+            $query->columns !== null && $query->columns !== ['*'] && $query->columns !== [$model->getTable().'.*'] => 'a custom select',
             default => null,
         };
 

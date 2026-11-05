@@ -15,6 +15,7 @@ use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Definition\SearchStage;
 use Happenv\ModelSearch\Exceptions\SearchFailed;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
+use Happenv\ModelSearch\Exceptions\UnknownDefinition;
 use Happenv\ModelSearch\Normalization\LikeEscaper;
 use Happenv\ModelSearch\Normalization\Normalizer;
 use Happenv\ModelSearch\Normalization\PhraseShape;
@@ -25,12 +26,13 @@ use Happenv\ModelSearch\Query\SearchMatch;
 use Happenv\ModelSearch\Query\SearchQuery;
 use Happenv\ModelSearch\Query\SearchResult;
 use Happenv\ModelSearch\Query\SearchResults;
+use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
 
 /**
@@ -72,7 +74,7 @@ SQL;
     #[\Override]
     public function get(SearchQuery $query): SearchResults
     {
-        $hits = $this->hits($query, forTable: false, fuzzy: false);
+        $hits = $this->hits(Probe::of($query), forTable: false, fuzzy: false, query: $query);
 
         if (! $hits instanceof Fragment) {
             return new SearchResults;
@@ -86,7 +88,7 @@ SQL;
                 $restricted = $stage instanceof SearchStage;
                 $rows = $this->select($this->rowsSql($query, $hits, $host, $stage, $restricted));
 
-                if ($restricted && array_all($rows, static fn (Hit $hit): bool => $hit->level === 0)) {
+                if ($restricted && ($rows === [] || ! $rows[0]->hasNonExact)) {
                     $restricted = false;
                     $rows = $this->select($this->rowsSql($query, $hits, $host, $stage, false));
                 }
@@ -99,19 +101,19 @@ SQL;
 
         $settled = $stage instanceof SearchStage ? ($restricted ? $stage->key : SearchStage::ALL) : null;
 
-        return new SearchResults($this->results($rows, $host, $stage), false, $settled);
+        return new SearchResults($this->results($query, $rows, $host, $stage), false, $settled);
     }
 
     #[\Override]
     public function similar(SearchQuery $query): SearchResults
     {
-        $hits = $this->hits($query, forTable: false, fuzzy: true);
+        $hits = $this->hits(Probe::of($query), forTable: false, fuzzy: true);
 
         if (! $hits instanceof Fragment) {
             return new SearchResults;
         }
 
-        $stage = $this->definition->constrainedStage();
+        $stage = $query->stagesEnabled() ? $this->definition->constrainedStage() : null;
         $host = $query->scope();
 
         try {
@@ -120,30 +122,23 @@ SQL;
             return new SearchResults(timedOut: true);
         }
 
-        return new SearchResults($this->results($rows, $host, $stage));
+        return new SearchResults($this->results($query, $rows, $host, $stage));
     }
 
     #[\Override]
     public function apply(SearchQuery $query, Builder $tableQuery): Builder
     {
-        $hits = $this->hits($query, forTable: true, fuzzy: false);
+        $hits = $this->hits(Probe::of($query), forTable: true, fuzzy: false, query: $query);
 
-        if (! $hits instanceof Fragment) {
-            $tableQuery->whereRaw('1 = 0');
+        $ids = [];
 
-            return $tableQuery;
+        if ($hits instanceof Fragment) {
+            $rows = $this->run($this->timeout('search'), fn (): array => $this->select($this->idsSql($query, $hits)));
+            $ids = array_values(array_unique(array_map(static fn (Hit $hit): string => $hit->rootId, $rows)));
+            IdNarrowing::assertWithinCap($ids);
         }
 
-        $rows = $this->run($this->timeout('search'), fn (): array => $this->select($this->idsSql($query, $hits)));
-        $ids = array_values(array_unique(array_map(static fn (Hit $hit): string => $hit->rootId, $rows)));
-
-        if ($ids === []) {
-            $tableQuery->whereRaw('1 = 0');
-
-            return $tableQuery;
-        }
-
-        $tableQuery->whereIn($tableQuery->getModel()->getQualifiedKeyName(), $ids);
+        IdNarrowing::narrow($tableQuery, $ids, $this->keyType());
 
         return $tableQuery;
     }
@@ -151,7 +146,7 @@ SQL;
     #[\Override]
     public function candidates(SearchQuery $query): Collection
     {
-        $hits = $this->hits($query, forTable: false, fuzzy: false);
+        $hits = $this->hits(Probe::of($query), forTable: false, fuzzy: false, query: $query);
 
         if (! $hits instanceof Fragment) {
             return new Collection;
@@ -163,7 +158,7 @@ SQL;
         return new Collection(array_map(fn (Hit $hit): array => [
             'type' => $this->definition->morphAlias,
             'id' => $hit->rootId,
-            'mode' => Mode::fromRank($hit->level),
+            'mode' => $hit->mode(),
             'kind' => $hit->kind,
             'value' => $hit->value,
             'stage' => $this->stageOf($hit, $stage),
@@ -172,21 +167,28 @@ SQL;
 
     /**
      * The union of everything that matches the phrase, one row per matching field and record:
-     * `(root_id, kind, level, weight, value, root_key)`, the key once as text and once typed.
-     * Null when nothing can match.
+     * `(root_id, kind, level, weight, value, via, root_key)`, the key once as text and once typed.
+     * Null when nothing can match. Fields that follow a parent are served only for a `$query`
+     * that carries the parent's scope.
      */
-    private function hits(SearchQuery $query, bool $forTable, bool $fuzzy): ?Fragment
+    private function hits(Probe $probe, bool $forTable, bool $fuzzy, ?SearchQuery $query = null): ?Fragment
     {
-        $phrase = $query->phraseText();
-        $locale = $query->viewerLocale();
         $branches = [];
 
         if (! $fuzzy) {
             foreach ($this->definition->fields as $field) {
-                $modes = $this->keyModes($field, $query);
+                $modes = $this->keyModes($field, $probe);
 
                 if ($modes !== [] && $field->compiledPath !== null) {
-                    $branch = $this->keyBranch($field, $modes, $phrase, $locale, $forTable);
+                    $branch = $this->keyBranch($field, $modes, $probe->phrase, $probe->locale, $forTable);
+
+                    if ($branch instanceof Fragment) {
+                        $branches[] = $branch;
+                    }
+                }
+
+                if ($query instanceof SearchQuery && $field->type === FieldType::Via && $this->isChosen($field, $probe)) {
+                    $branch = $this->viaBranch($field, $probe, $forTable, $query);
 
                     if ($branch instanceof Fragment) {
                         $branches[] = $branch;
@@ -195,12 +197,12 @@ SQL;
             }
         }
 
-        if (! PhraseShape::isIdentifierLike($phrase)) {
+        if (! PhraseShape::isIdentifierLike($probe->phrase)) {
             $names = array_values(array_filter(
                 $this->definition->fields,
-                fn (CompiledField $field): bool => $this->isNameField($field, $query, $fuzzy),
+                fn (CompiledField $field): bool => $this->isNameField($field, $probe, $fuzzy),
             ));
-            $sets = $this->wordSets($phrase, $locale, $this->minLength($fuzzy ? Mode::Fuzzy : Mode::Prefix, $forTable));
+            $sets = $this->wordSets($probe->phrase, $probe->locale, $this->minLength($fuzzy ? Mode::Fuzzy : Mode::Prefix, $forTable));
 
             if ($names !== [] && $sets !== []) {
                 $branches[] = $this->nameBranch($names, $sets, $fuzzy);
@@ -214,40 +216,96 @@ SQL;
         $union = Fragment::join(array_map(static fn (Fragment $branch): Fragment => new Fragment('('.$branch->sql.')', $branch->bindings), $branches), ' UNION ALL ');
 
         return new Fragment(
-            sprintf('SELECT u."root_id", u."kind", u."level", u."weight", u."value", u."root_id"::%s AS "root_key" FROM (%s) AS u', $this->keyType(), $union->sql),
+            sprintf('SELECT u."root_id", u."kind", u."level", u."weight", u."value", u."via", u."root_id"::%s AS "root_key" FROM (%s) AS u', $this->keyType(), $union->sql),
             $union->bindings,
+        );
+    }
+
+    /**
+     * Records found through a parent: the parent's hits on the kinds the field follows, kept only for
+     * parents inside the parent's own scope, then the records that belong to them. Closed (null) when
+     * no parent scope was given, the parent has no definition, or the relation is not a BelongsTo.
+     */
+    private function viaBranch(CompiledField $field, Probe $probe, bool $forTable, SearchQuery $query): ?Fragment
+    {
+        $child = new ($this->definition->modelClass);
+        $relation = method_exists($child, $field->path) ? $child->{$field->path}() : null;
+
+        if (! $relation instanceof BelongsTo) {
+            return null;
+        }
+
+        $parentClass = $relation->getRelated()::class;
+        $parentScope = $query->parentScope($parentClass);
+
+        if (! $parentScope instanceof HostQuery) {
+            return null;
+        }
+
+        try {
+            $parentDefinition = resolve(ModelSearchRegistry::class)->for($parentClass);
+        } catch (UnknownDefinition) {
+            return null;
+        }
+
+        $parentHits = new self($parentDefinition)->hits($probe->forKinds($field->via), $forTable, false);
+
+        if (! $parentHits instanceof Fragment) {
+            return null;
+        }
+
+        $revealing = array_values(array_map(
+            static fn (CompiledField $parentField): string => $parentField->kind,
+            array_filter($parentDefinition->fields, static fn (CompiledField $parentField): bool => $parentField->reveal instanceof Closure),
+        ));
+        $scope = $parentScope->sql();
+        $softDelete = Sql::softDeleteColumn($child);
+
+        return new Fragment(
+            sprintf(
+                'SELECT c.%1$s::text AS "root_id", CAST(? AS text) AS "kind", (p."level" + %2$d) AS "level", CAST(? AS integer) AS "weight", CASE WHEN p."kind" = ANY(?::text[]) THEN NULL ELSE p."value" END AS "value", CAST(? AS text) AS "via" FROM (%3$s) AS p JOIN (%4$s) AS "parent_host" ON "parent_host".%5$s = p."root_key" JOIN %6$s AS c ON c.%7$s = p."root_key"%8$s',
+                Sql::ident($child->getKeyName()),
+                Hit::VIA_OFFSET,
+                $parentHits->sql,
+                $scope['sql'],
+                Sql::ident(HostQuery::KEY_ALIAS),
+                Sql::table($child),
+                Sql::ident($relation->getForeignKeyName()),
+                $softDelete === null ? '' : ' AND c.'.Sql::ident($softDelete).' IS NULL',
+            ),
+            [$field->kind, $field->weight, Sql::arrayLiteral($revealing), $field->kind, ...$parentHits->bindings, ...$scope['bindings']],
         );
     }
 
     /**
      * @return list<Mode>
      */
-    private function keyModes(CompiledField $field, SearchQuery $query): array
+    private function keyModes(CompiledField $field, Probe $probe): array
     {
-        if ($field->type !== FieldType::Key || ! $this->isChosen($field, $query)) {
+        if ($field->type !== FieldType::Key || ! $this->isChosen($field, $probe)) {
             return [];
         }
 
         return array_values(array_filter(
             [Mode::Exact, Mode::Prefix, Mode::Suffix, Mode::Infix],
-            static fn (Mode $mode): bool => in_array($mode, $field->modes, true) && ($query->onlyModes() === [] || in_array($mode, $query->onlyModes(), true)),
+            static fn (Mode $mode): bool => in_array($mode, $field->modes, true) && ($probe->modes === [] || in_array($mode, $probe->modes, true)),
         ));
     }
 
-    private function isNameField(CompiledField $field, SearchQuery $query, bool $fuzzy): bool
+    private function isNameField(CompiledField $field, Probe $probe, bool $fuzzy): bool
     {
-        if ($field->type !== FieldType::Name || ! $field->compiledPath instanceof CompiledPath || ! $this->isChosen($field, $query)) {
+        if ($field->type !== FieldType::Name || ! $field->compiledPath instanceof CompiledPath || ! $this->isChosen($field, $probe)) {
             return false;
         }
 
         $mode = $fuzzy ? Mode::Fuzzy : Mode::Prefix;
 
-        return in_array($mode, $field->modes, true) && ($fuzzy || $query->onlyModes() === [] || in_array($mode, $query->onlyModes(), true));
+        return in_array($mode, $field->modes, true) && ($fuzzy || $probe->modes === [] || in_array($mode, $probe->modes, true));
     }
 
-    private function isChosen(CompiledField $field, SearchQuery $query): bool
+    private function isChosen(CompiledField $field, Probe $probe): bool
     {
-        return $query->onlyKinds() === [] || in_array($field->kind, $query->onlyKinds(), true);
+        return $probe->kinds === [] || in_array($field->kind, $probe->kinds, true);
     }
 
     private function minLength(Mode $mode, bool $forTable): int
@@ -299,7 +357,7 @@ SQL;
 
         return new Fragment(
             sprintf(
-                'SELECT x."root_id", x."kind", x."level", x."weight", x."value" FROM (SELECT t."root_id", CAST(? AS text) AS "kind", CAST(? AS integer) AS "weight", t."value", CASE %s END AS "level" FROM (SELECT c."root_id", c."value", %s AS "f" FROM (%s) AS c) AS t) AS x WHERE x."level" IS NOT NULL',
+                'SELECT x."root_id", x."kind", x."level", x."weight", x."value", CAST(NULL AS text) AS "via" FROM (SELECT t."root_id", CAST(? AS text) AS "kind", CAST(? AS integer) AS "weight", t."value", CASE %s END AS "level" FROM (SELECT c."root_id", c."value", %s AS "f" FROM (%s) AS c) AS t) AS x WHERE x."level" IS NOT NULL',
                 implode(' ', $cases),
                 $fold,
                 $contribution->sql,
@@ -390,7 +448,7 @@ SQL;
 
         return new Fragment(
             sprintf(
-                'SELECT m."root_id", (array_agg(m."kind" ORDER BY m."kind", m."value") FILTER (WHERE m."pick"))[1] AS "kind", %d AS "level", max(m."weight") FILTER (WHERE m."pick") AS "weight", (array_agg(m."value" ORDER BY m."kind", m."value") FILTER (WHERE m."pick"))[1] AS "value" FROM (SELECT n."root_id", n."kind", n."weight", n."value", %s, (%s) AS "pick" FROM (%s) AS n) AS m GROUP BY m."root_id" HAVING %s',
+                'SELECT m."root_id", (array_agg(m."kind" ORDER BY m."kind", m."value") FILTER (WHERE m."pick"))[1] AS "kind", %d AS "level", max(m."weight") FILTER (WHERE m."pick") AS "weight", (array_agg(m."value" ORDER BY m."kind", m."value") FILTER (WHERE m."pick"))[1] AS "value", CAST(NULL AS text) AS "via" FROM (SELECT n."root_id", n."kind", n."weight", n."value", %s, (%s) AS "pick" FROM (%s) AS n) AS m GROUP BY m."root_id" HAVING %s',
                 ($fuzzy ? Mode::Fuzzy : Mode::Prefix)->rank(),
                 implode(', ', $selects),
                 $pick,
@@ -425,13 +483,13 @@ SQL;
         }
 
         if ($restriction instanceof Fragment) {
-            $where[] = sprintf('(h."level" = 0 OR %s)', $restriction->sql);
+            $where[] = sprintf('(h."level" %% %d = 0 OR %s)', Hit::VIA_OFFSET, $restriction->sql);
             array_push($bindings, ...$restriction->bindings);
         }
 
         return new Fragment(
             sprintf(
-                'SELECT ranked."root_id", ranked."kind", ranked."level", ranked."weight", ranked."value", ranked."in_stage" FROM (SELECT DISTINCT ON (h."root_id") h."root_id", h."kind", h."level", h."weight", h."value", %1$s AS "sort_at", %2$s AS "in_stage" FROM (%3$s) AS h JOIN (%4$s) AS "host" ON "host".%5$s = h."root_key" JOIN %6$s AS r ON r.%7$s = h."root_key"%8$s ORDER BY h."root_id", h."level", h."weight" DESC, h."kind") AS ranked ORDER BY ranked."level", ranked."weight" DESC, ranked."sort_at" DESC NULLS LAST, ranked."root_id" LIMIT %9$d',
+                'SELECT ranked."root_id", ranked."kind", ranked."level", ranked."weight", ranked."value", ranked."via", ranked."in_stage", ranked."has_non_exact" FROM (SELECT DISTINCT ON (h."root_id") h."root_id", h."kind", h."level", h."weight", h."value", h."via", %1$s AS "sort_at", %2$s AS "in_stage", max(CASE WHEN h."level" %% %10$d > 0 THEN 1 ELSE 0 END) OVER () AS "has_non_exact" FROM (%3$s) AS h JOIN (%4$s) AS "host" ON "host".%5$s = h."root_key" JOIN %6$s AS r ON r.%7$s = h."root_key"%8$s ORDER BY h."root_id", h."level", h."weight" DESC, h."kind") AS ranked ORDER BY ranked."level", ranked."weight" DESC, ranked."sort_at" DESC NULLS LAST, ranked."root_id" LIMIT %9$d',
                 $sortAt,
                 $inStage->sql,
                 $hits->sql,
@@ -441,6 +499,7 @@ SQL;
                 Sql::ident($model->getKeyName()),
                 $where === [] ? '' : ' WHERE '.implode(' AND ', $where),
                 $query->maxResults(),
+                Hit::VIA_OFFSET,
             ),
             $bindings,
         );
@@ -464,13 +523,14 @@ SQL;
 
         return new Fragment(
             sprintf(
-                'SELECT DISTINCT h."root_id" FROM (%1$s) AS h JOIN (%2$s) AS "host" ON "host".%3$s = h."root_key" JOIN %4$s AS r ON r.%5$s = h."root_key"%6$s',
+                'SELECT DISTINCT h."root_id" FROM (%1$s) AS h JOIN (%2$s) AS "host" ON "host".%3$s = h."root_key" JOIN %4$s AS r ON r.%5$s = h."root_key"%6$s LIMIT %7$d',
                 $hits->sql,
                 $hostSql['sql'],
                 Sql::ident(HostQuery::KEY_ALIAS),
                 Sql::table($model),
                 Sql::ident($model->getKeyName()),
                 $where,
+                IdNarrowing::lookupLimit(),
             ),
             $bindings,
         );
@@ -493,7 +553,7 @@ SQL;
 
         return new Fragment(
             sprintf(
-                'SELECT h."root_id", h."kind", h."level", h."weight", h."value", %1$s AS "in_stage" FROM (%2$s) AS h JOIN %3$s AS r ON r.%4$s = h."root_key"%5$s ORDER BY h."level", h."weight" DESC, h."root_id", h."kind" LIMIT %6$d',
+                'SELECT h."root_id", h."kind", h."level", h."weight", h."value", h."via", %1$s AS "in_stage" FROM (%2$s) AS h JOIN %3$s AS r ON r.%4$s = h."root_key"%5$s ORDER BY h."level", h."weight" DESC, h."root_id", h."kind" LIMIT %6$d',
                 $inStage->sql,
                 $hits->sql,
                 Sql::table($model),
@@ -525,12 +585,12 @@ SQL;
      * @param  list<Hit>  $rows
      * @return list<SearchResult>
      */
-    private function results(array $rows, HostQuery $host, ?SearchStage $stage): array
+    private function results(SearchQuery $query, array $rows, HostQuery $host, ?SearchStage $stage): array
     {
         $models = $host->hydrate(array_map(static fn (Hit $hit): string => $hit->rootId, $rows))
             ->keyBy(static fn (Model $model): string => (string) $model->getKey());
         $reveal = new RevealPolicy($this->definition);
-        $viewer = Auth::user();
+        $viewer = $query->viewer();
         $results = [];
 
         foreach ($rows as $hit) {
@@ -545,8 +605,9 @@ SQL;
                 kind: $hit->kind,
                 label: $field?->label instanceof Closure ? ($field->label)() : Str::headline($hit->kind),
                 value: $hit->value,
-                mode: Mode::fromRank($hit->level),
+                mode: $hit->mode(),
                 stage: $this->stageOf($hit, $stage),
+                via: $hit->via,
             );
 
             $results[] = new SearchResult($model, $reveal->apply($match, $model, $viewer));

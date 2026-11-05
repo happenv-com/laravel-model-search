@@ -3,8 +3,6 @@
 declare(strict_types=1);
 
 use Happenv\ModelSearch\Drivers\DatabaseDriver;
-use Happenv\ModelSearch\Facades\ModelSearch;
-use Happenv\ModelSearch\Query\SearchQuery;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Illuminate\Support\Facades\DB;
@@ -38,8 +36,8 @@ it('puts the stage zero restriction in the first pass only', function (): void {
     DB::disableQueryLog();
 
     expect($searches)->toHaveCount(2)
-        ->and($searches[0]['query'])->toContain('(h."level" = 0 OR EXISTS')
-        ->and($searches[1]['query'])->not->toContain('(h."level" = 0 OR EXISTS');
+        ->and($searches[0]['query'])->toContain('(h."level" % 10 = 0 OR EXISTS')
+        ->and($searches[1]['query'])->not->toContain('(h."level" % 10 = 0 OR EXISTS');
 });
 
 it('sets the statement timeout as a literal inside the transaction', function (): void {
@@ -64,11 +62,6 @@ it('keeps the phrase to bound parameters of the search statement', function (): 
 
     $search = array_values(array_filter($log, static fn (array $e): bool => str_contains($e['query'], 'DISTINCT ON')))[0];
 
-    expect($search['query'])->not->toContain('ABCDEF')->and($search['query'])->not->toContain('abcdef')
+    expect(stripos($search['query'], 'abcdef'))->toBeFalse()
         ->and(json_encode($search['bindings']))->toContain('abcdef');
-});
-
-it('is what the search query hands the work to', function (): void {
-    expect(ModelSearch::for(Order::class))->not->toBeNull()
-        ->and(OrderSearch::query('x'))->toBeInstanceOf(SearchQuery::class);
 });

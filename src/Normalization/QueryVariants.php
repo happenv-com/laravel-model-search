@@ -17,7 +17,7 @@ final class QueryVariants
     /**
      * @return list<string>
      */
-    public static function for(string $q, ?string $locale): array
+    public static function for(#[\SensitiveParameter] string $q, ?string $locale): array
     {
         $normalizer = new NameNormalizer;
         $neutral = $normalizer->normalize($q);
@@ -36,7 +36,7 @@ final class QueryVariants
      *
      * @return list<string>
      */
-    public static function keysFor(string $q, ?string $locale): array
+    public static function keysFor(#[\SensitiveParameter] string $q, ?string $locale): array
     {
         $normalizer = new KeyNormalizer;
         $keys = [$normalizer->normalize($q)];

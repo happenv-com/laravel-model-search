@@ -47,6 +47,25 @@ it('accepts from, joins, conditions and global scopes', function (): void {
         ->and($query['bindings'])->toBe(['unshipped']);
 });
 
+it('accepts a select of exactly the model table', function (): void {
+    expect(fn () => HostQuery::from(Order::query()->select('orders.*')))->not->toThrow(UnsupportedHostQuery::class)
+        ->and(fn () => HostQuery::from(Order::query()->select('parcels.*')))->toThrow(UnsupportedHostQuery::class);
+});
+
+it('hydrates the right records through a joined host', function (): void {
+    $orders = [Order::create(['signature' => 'O1']), Order::create(['signature' => 'O2']), Order::create(['signature' => 'O3'])];
+    $parcels = [];
+    foreach ($orders as $index => $order) {
+        $parcels[] = Parcel::create(['order_id' => $order->id, 'reference' => 'P'.$index]);
+    }
+
+    $host = HostQuery::from(Parcel::query()->join('orders', 'orders.id', '=', 'parcels.order_id')->where('orders.state', 'unshipped'));
+    $models = $host->hydrate([$parcels[2]->id, $parcels[0]->id, $parcels[1]->id]);
+
+    expect($models->pluck('id')->all())->toBe([$parcels[2]->id, $parcels[0]->id, $parcels[1]->id])
+        ->and($models->pluck('reference')->all())->toBe(['P2', 'P0', 'P1']);
+});
+
 it('selects only the primary key', function (): void {
     Order::create(['signature' => 'A-1']);
     $query = HostQuery::from(Order::query()->where('signature', 'A-1'))->sql();
