@@ -10,11 +10,19 @@ return new class extends Migration
 {
     public function up(): void
     {
+        Schema::create('countries', function (Blueprint $table): void {
+            $table->id();
+            $table->text('name')->nullable();
+            $table->timestampsTz(6);
+        });
+
         Schema::create('addresses', function (Blueprint $table): void {
             $table->uuid('id')->primary();
             $table->text('name')->nullable();
             $table->text('phone')->nullable();
+            $table->bigInteger('country_id')->nullable();
             $table->timestampsTz(6);
+            $table->index('country_id');
         });
 
         Schema::create('orders', function (Blueprint $table): void {
@@ -44,15 +52,40 @@ return new class extends Migration
             $table->uuid('order_id')->nullable();
             $table->text('reference')->nullable();
             $table->timestampsTz(6);
+            $table->softDeletesTz('deleted_at', 6);
             $table->index('order_id');
         });
 
         Schema::create('carrier_units', function (Blueprint $table): void {
             $table->id();
-            $table->uuid('parcel_id');
+            $table->uuid('parcel_id')->nullable();
+            $table->uuid('order_id')->nullable();
             $table->text('tracking_number')->nullable();
             $table->timestampsTz(6);
             $table->index('parcel_id');
+            $table->index('order_id');
+        });
+
+        Schema::create('tags', function (Blueprint $table): void {
+            $table->id();
+            $table->text('name')->nullable();
+            $table->timestampsTz(6);
+        });
+
+        Schema::create('order_tag', function (Blueprint $table): void {
+            $table->uuid('order_id');
+            $table->bigInteger('tag_id');
+            $table->index('order_id');
+            $table->index('tag_id');
+        });
+
+        Schema::create('notes', function (Blueprint $table): void {
+            $table->id();
+            $table->text('noteable_type');
+            $table->uuid('noteable_id');
+            $table->text('body')->nullable();
+            $table->timestampsTz(6);
+            $table->index(['noteable_type', 'noteable_id']);
         });
 
         Schema::create('products', function (Blueprint $table): void {
@@ -61,7 +94,7 @@ return new class extends Migration
             $table->text('ean')->nullable();
             $table->jsonb('name')->nullable();
             $table->timestampsTz(6);
-            $table->softDeletesTz(6);
+            $table->softDeletesTz('deleted_at', 6);
         });
 
         Schema::create('invoices', function (Blueprint $table): void {

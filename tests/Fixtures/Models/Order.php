@@ -8,8 +8,14 @@ use Happenv\ModelSearch\Tests\Fixtures\Builders\OrderBuilder;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\HasOneThrough;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Database\Eloquent\Relations\MorphOne;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Database\Query\Builder;
 
 /**
@@ -70,5 +76,76 @@ final class Order extends Model
     public function parcels(): HasMany
     {
         return $this->hasMany(Parcel::class, 'order_id');
+    }
+
+    /**
+     * @return BelongsTo<ScopedAddress, $this>
+     */
+    public function scopedBillingAddress(): BelongsTo
+    {
+        return $this->belongsTo(ScopedAddress::class, 'billing_address_id');
+    }
+
+    /**
+     * A genuine one-to-one: the carrier unit carries the order's key.
+     *
+     * @return HasOne<CarrierUnit, $this>
+     */
+    public function carrierUnit(): HasOne
+    {
+        return $this->hasOne(CarrierUnit::class, 'order_id');
+    }
+
+    /**
+     * @return HasOneThrough<CarrierUnit, Parcel, $this>
+     */
+    public function parcelCarrierUnit(): HasOneThrough
+    {
+        return $this->hasOneThrough(CarrierUnit::class, Parcel::class, 'order_id', 'parcel_id');
+    }
+
+    /**
+     * @return HasManyThrough<CarrierUnit, Parcel, $this>
+     */
+    public function parcelCarrierUnits(): HasManyThrough
+    {
+        return $this->hasManyThrough(CarrierUnit::class, Parcel::class, 'order_id', 'parcel_id');
+    }
+
+    /**
+     * @return BelongsToMany<Tag, $this>
+     */
+    public function tags(): BelongsToMany
+    {
+        return $this->belongsToMany(Tag::class, 'order_tag', 'order_id', 'tag_id');
+    }
+
+    /**
+     * @return MorphMany<Note, $this>
+     */
+    public function notes(): MorphMany
+    {
+        return $this->morphMany(Note::class, 'noteable');
+    }
+
+    /**
+     * @return MorphOne<Note, $this>
+     */
+    public function latestNote(): MorphOne
+    {
+        return $this->morphOne(Note::class, 'noteable');
+    }
+
+    /**
+     * @return MorphTo<Model, $this>
+     */
+    public function subject(): MorphTo
+    {
+        return $this->morphTo();
+    }
+
+    public function notARelation(): string
+    {
+        return 'nope';
     }
 }

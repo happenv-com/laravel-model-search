@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Definition;
 
 use Closure;
+use Happenv\ModelSearch\Compilation\CompiledPath;
 use Happenv\ModelSearch\Normalization\Normalizer;
 
 final readonly class CompiledField
@@ -27,5 +28,25 @@ final readonly class CompiledField
         public ?Closure $reveal,
         public int $weight,
         public bool $declaredByExtension,
+        public ?CompiledPath $compiledPath = null,
     ) {}
+
+    public function withCompiledPath(CompiledPath $compiledPath): self
+    {
+        return new self(
+            $this->type,
+            $this->path,
+            $this->kind,
+            $this->modes,
+            $this->via,
+            $this->label,
+            $this->exactOnSource,
+            $this->normalizer,
+            $this->translatable,
+            $this->reveal,
+            $this->weight,
+            $this->declaredByExtension,
+            $compiledPath,
+        );
+    }
 }

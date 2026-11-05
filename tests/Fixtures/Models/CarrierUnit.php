@@ -9,7 +9,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * @property int $id
- * @property string $parcel_id
+ * @property string|null $parcel_id
+ * @property string|null $order_id
  * @property string|null $tracking_number
  */
 final class CarrierUnit extends Model

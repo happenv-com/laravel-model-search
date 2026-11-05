@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 /**
  * @property string $id
@@ -18,6 +19,8 @@ final class Parcel extends Model
 {
     /** @use HasUuids<Parcel> */
     use HasUuids;
+
+    use SoftDeletes;
 
     protected $table = 'parcels';
 

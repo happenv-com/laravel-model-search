@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Registry;
 
+use Happenv\ModelSearch\Compilation\KeyType;
+use Happenv\ModelSearch\Compilation\PathCompiler;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\CompiledField;
+use Happenv\ModelSearch\Definition\FieldType;
 use Happenv\ModelSearch\Definition\ModelSearch;
 use Happenv\ModelSearch\Definition\ModelSearchExtension;
 use Happenv\ModelSearch\Definition\SearchField;
@@ -17,7 +20,6 @@ use Happenv\ModelSearch\Exceptions\ExtensionWithoutDefinition;
 use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\UnknownDefinition;
 use Happenv\ModelSearch\Exceptions\UnsupportedStages;
-use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -131,13 +133,13 @@ final class ModelSearchRegistry
     {
         $model = new $modelClass;
 
-        $fields = $this->compileFields($modelClass, $definition);
+        $fields = $this->compilePaths($modelClass, $this->compileFields($modelClass, $definition), $definition->withScopes());
         $stages = $this->compileStages($modelClass, $definition);
 
         return new CompiledDefinition(
             modelClass: $modelClass,
             morphAlias: $model->getMorphClass(),
-            keyType: $this->keyType($model),
+            keyType: KeyType::of($model),
             fields: $fields,
             stages: $stages,
             sortAt: $definition->sortAt(),
@@ -189,6 +191,29 @@ final class ModelSearchRegistry
     }
 
     /**
+     * Compiles the path of every field, so a path that follows a missing or unsupported relation fails at registration.
+     *
+     * @param  class-string<Model>  $modelClass
+     * @param  list<CompiledField>  $fields
+     * @param  list<class-string>  $withScopes
+     * @return list<CompiledField>
+     */
+    private function compilePaths(string $modelClass, array $fields, array $withScopes): array
+    {
+        $compiler = new PathCompiler;
+
+        return array_map(static function (CompiledField $field) use ($compiler, $modelClass, $withScopes): CompiledField {
+            if ($field->type === FieldType::Via) {
+                $compiler->assertRelation($modelClass, $field->path);
+
+                return $field;
+            }
+
+            return $field->withCompiledPath($compiler->compile($modelClass, $field->path, $field->translatable, $withScopes));
+        }, $fields);
+    }
+
+    /**
      * @param  class-string<Model>  $modelClass
      * @return list<SearchStage>
      */
@@ -229,17 +254,5 @@ final class ModelSearchRegistry
         }
 
         return $stages;
-    }
-
-    /**
-     * @return 'uuid'|'bigint'|'text'
-     */
-    private function keyType(Model $model): string
-    {
-        if ($model->getKeyType() === 'int') {
-            return 'bigint';
-        }
-
-        return in_array(HasUuids::class, class_uses_recursive($model), true) ? 'uuid' : 'text';
     }
 }
