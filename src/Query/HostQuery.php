@@ -87,7 +87,7 @@ final readonly class HostQuery
     {
         $model = $this->builder->getModel();
         $query = $this->builder->clone()->applyScopes()->getQuery();
-        $variants = $query->newQuery()->fromRaw('unnest(?::text[]) AS "source_variants"("variant")', [Sql::arrayLiteral($values)])->select('source_variants.variant');
+        $variants = $query->newQuery()->fromRaw('unnest(?::text[]) AS "source_variants"("variant")', [Sql::arrayLiteral($values)])->selectRaw('"source_variants"."variant"');
         $qualified = $model->qualifyColumn($column);
 
         $query->select([$model->getQualifiedKeyName().' as '.self::KEY_ALIAS, $model->qualifyColumn($column).' as source_value']);

@@ -9,6 +9,8 @@ use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Postgres\Session\PrivacyGate;
 use Happenv\ModelSearch\Postgres\Session\SearchConnectionFactory;
 use Happenv\ModelSearch\Postgres\Session\SearchSession;
+use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Session\IgnoringParameterLogFactory;
 use Happenv\ModelSearch\Tests\Fixtures\Session\UnreadableSettingsFactory;
 use Happenv\ModelSearch\Tests\TruncationTestCase;
@@ -305,4 +307,26 @@ it('makes the rethrown deadlock detectable without the phrase', function (): voi
         ->and(new ConcurrencyErrorDetector()->causedByConcurrencyError($caught))->toBeTrue()
         ->and($caught->getMessage())->not->toContain('SECRETPHRASE')
         ->and($caught->getPrevious())->toBeNull();
+});
+
+it('never hands the phrase to the cumulative query duration handlers of the host', function (): void {
+    Order::create(['signature' => 'DURATION-1']);
+    msIndex();
+    $seen = [];
+    // A handler runs once per arming, so it arms itself again: every statement the host's connection runs is heard.
+    $arm = static function () use (&$arm, &$seen): void {
+        DB::whenQueryingForLongerThan(0, static function ($connection, $event) use (&$arm, &$seen): void {
+            $seen[] = json_encode($event->bindings).$event->sql;
+            $arm();
+        });
+    };
+    $arm();
+
+    $results = OrderSearch::query('DURATION')->within(Order::query())->get();
+
+    expect(msSignatures($results))->toBe(['DURATION-1'])
+        // The control: the handler is armed and does hear the host's own statements (the read of the index state).
+        ->and(implode("\n", $seen))->toContain('model_search_state')
+        ->and(stripos(implode("\n", $seen), 'duration'))->toBeFalse()
+        ->and(array_filter($seen, static fn (string $statement): bool => str_contains($statement, 'model_search_keys') || str_contains($statement, 'model_search_entries')))->toBe([]);
 });

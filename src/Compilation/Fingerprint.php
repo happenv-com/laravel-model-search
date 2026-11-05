@@ -28,8 +28,9 @@ final class Fingerprint
 {
     public static function of(CompiledDefinition $definition): string
     {
+        // Declaration order is part of the content: the cap on name words is applied in it, so swapping two name fields
+        // changes which words are indexed. Only what has no effect on the rows (modes, via) is sorted, inside a field.
         $fields = array_map(self::field(...), $definition->fields);
-        usort($fields, static fn (array $left, array $right): int => strcmp((string) $left['kind'], (string) $right['kind']));
 
         $payload = [
             'morph_alias' => $definition->morphAlias,

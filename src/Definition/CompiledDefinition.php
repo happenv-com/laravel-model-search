@@ -186,13 +186,19 @@ final readonly class CompiledDefinition
         $model = new ($this->modelClass);
         $inner = $model->newQueryWithoutScopes();
         $inner->selectRaw('1');
-        $inner->whereColumn($keyColumn, '=', $model->getQualifiedKeyName());
+        // The correlated column is an alias of the outer statement: through whereColumn() the grammar would put the
+        // connection's table prefix on it, as it does on every `<table>.<column>`. The builder takes a literal marker,
+        // and the correlation, made of quoted identifiers only, replaces it in the finished statement.
+        $inner->whereRaw('__model_search_correlation__');
         $inner->where(static function ($query) use ($constraint): void {
             $constraint($query);
         });
 
         $base = $inner->getQuery();
 
-        return ['sql' => 'EXISTS ('.$base->toSql().')', 'bindings' => $base->getBindings()];
+        $outer = implode('.', array_map(Sql::ident(...), explode('.', $keyColumn)));
+        $correlation = $outer.' = '.$base->getGrammar()->wrap($model->getQualifiedKeyName());
+
+        return ['sql' => 'EXISTS ('.str_replace('__model_search_correlation__', $correlation, $base->toSql()).')', 'bindings' => $base->getBindings()];
     }
 }

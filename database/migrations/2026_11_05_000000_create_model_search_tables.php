@@ -50,8 +50,11 @@ return new class extends Migration
             $table->primary(['subject_type', 'subject_id', 'kind', 'key']);
         });
 
-        foreach ([$names->entries(), $names->keys()] as $table) {
-            DB::statement(sprintf('ALTER TABLE "%s" SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.01)', $table));
+        // Raw SQL is not prefixed by the schema builder: the connection's own table prefix is added by hand.
+        $prefixed = TableNames::forConnection($this->getConnection());
+
+        foreach ([$prefixed->entries(), $prefixed->keys()] as $table) {
+            DB::connection($this->getConnection())->statement(sprintf('ALTER TABLE %s SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.01)', $prefixed->quoted($table)));
         }
 
         Schema::create($names->changes(), function (Blueprint $table): void {

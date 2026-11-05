@@ -77,6 +77,14 @@ it('changes when the name word rules change', function (): void {
         ->and(fingerprintOfConfigurableOrder())->not->toBe($minLength);
 });
 
+it('changes when two name fields swap places: the order decides which words survive the cap', function (): void {
+    ConfigurableOrderSearch::$fields = [SearchField::name('customer_name'), SearchField::name('shippingAddress.name')];
+    $before = fingerprintOfConfigurableOrder();
+    ConfigurableOrderSearch::$fields = [SearchField::name('shippingAddress.name'), SearchField::name('customer_name')];
+
+    expect(fingerprintOfConfigurableOrder())->not->toBe($before);
+});
+
 it('does not change when a label changes', function (): void {
     ConfigurableOrderSearch::$fields = [SearchField::key('signature')->label(static fn (): string => 'One')];
     $before = fingerprintOfConfigurableOrder();

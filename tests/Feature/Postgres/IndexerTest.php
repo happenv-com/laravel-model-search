@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Happenv\ModelSearch\Compilation\Fingerprint;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\SearchField;
 use Happenv\ModelSearch\Events\SearchIndexChanged;
@@ -255,6 +256,31 @@ describe('name words', function (): void {
 
         expect(DB::table(ixTable('keys'))->where('subject_id', $id)->where('kind', 'name_word')->orderBy('key')->pluck('key')->all())
             ->toBe(['ann', 'marie', 'oneil']);
+    });
+
+    it('keeps the words of the name field declared first when the cap bites, and a swap of the fields is a new definition', function (): void {
+        config(['model-search.name_words.max_per_record' => 1]);
+        $shipping = ixAddress(['name' => 'Zoë Nowak']);
+        $id = ixOrder(['customer_name' => 'Ann Kowalska', 'shipping_address_id' => $shipping]);
+        $words = static fn (): array => DB::table(ixTable('keys'))->where('subject_id', $id)->where('kind', 'name_word')->pluck('key')->all();
+
+        msUse([SearchField::name('customer_name'), SearchField::name('shippingAddress.name')]);
+        $first = app(ModelSearchRegistry::class)->for(Order::class);
+        msIndex();
+        $declaredFirst = $words();
+
+        $registry = new ModelSearchRegistry;
+        ConfigurableOrderSearch::$fields = [SearchField::name('shippingAddress.name'), SearchField::name('customer_name')];
+        $registry->register(ConfigurableOrderSearch::class);
+
+        expect($declaredFirst)->toBe(['ann'])
+            ->and(Fingerprint::of($registry->for(Order::class)))->not->toBe(Fingerprint::of($first));
+
+        app()->instance(ModelSearchRegistry::class, $registry);
+        DB::table(TableNames::forConnection()->state())->delete();
+        msIndex();
+
+        expect($words())->toBe(['zoe']);
     });
 
     it('follows a changed name', function (): void {
