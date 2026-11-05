@@ -147,7 +147,8 @@ final class SearchIndexer
 
     /**
      * Whether a parked failure is due for its automatic retry (the retry window has passed and attempts are left):
-     * the drain has work although the change log is empty. One indexed `EXISTS`; no definition is compiled.
+     * the drain has work although the change log is empty. One `EXISTS` on the failures table (narrowed by type through its
+     * primary key); no definition is compiled. Like `lag()`, it needs the package's tables: call it on migrated databases only.
      */
     public function hasDueFailures(): bool
     {
