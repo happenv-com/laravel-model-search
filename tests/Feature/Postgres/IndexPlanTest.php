@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Postgres\Schema\IndexPlan;
 use Happenv\ModelSearch\Postgres\Schema\IndexSpec;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
@@ -23,7 +24,7 @@ function plannedIndexNames(array $models): array
     $registry = app(ModelSearchRegistry::class);
 
     return array_map(
-        static fn (IndexSpec $spec): string => $spec->name,
+        static fn (IndexSpec $spec): string => $spec->family,
         IndexPlan::for(array_map(static fn (string $model) => $registry->for($model), $models), TableNames::forConnection()),
     );
 }
@@ -49,23 +50,23 @@ function liveIndexPredicate(string $index): string
 }
 
 it('plans name-word and stage-zero indexes only when a definition needs them', function (): void {
-    $always = ['model_search_keys_key_idx', 'model_search_keys_reverse_idx', 'model_search_entries_names_gin'];
+    $always = ['keys_key', 'keys_reverse', 'entries_names'];
 
     expect(plannedIndexNames([Invoice::class]))->toBe($always)
-        ->and(plannedIndexNames([Product::class]))->toBe([...$always, 'model_search_keys_name_word_idx'])
+        ->and(plannedIndexNames([Product::class]))->toBe([...$always, 'keys_name_word'])
         ->and(plannedIndexNames([Order::class]))->toBe([
             ...$always,
-            'model_search_keys_name_word_idx',
-            'model_search_keys_key_s0_idx',
-            'model_search_keys_reverse_s0_idx',
-            'model_search_keys_name_word_s0_idx',
+            'keys_name_word',
+            'keys_key_s0',
+            'keys_reverse_s0',
+            'keys_name_word_s0',
         ]);
 });
 
 it('keeps definitions apart: stage-zero name words need one definition with names and stages', function (): void {
     // Invoice: no names, no stages. Order: both. Product: names only.
-    expect(plannedIndexNames([Invoice::class, Product::class]))->not->toContain('model_search_keys_key_s0_idx')
-        ->and(plannedIndexNames([Invoice::class, Order::class]))->toContain('model_search_keys_name_word_s0_idx');
+    expect(plannedIndexNames([Invoice::class, Product::class]))->not->toContain('keys_key_s0')
+        ->and(plannedIndexNames([Invoice::class, Order::class]))->toContain('keys_name_word_s0');
 });
 
 it('leads the key indexes with the partition column when a definition is partitioned', function (): void {
@@ -76,7 +77,7 @@ it('leads the key indexes with the partition column when a definition is partiti
     $specs = IndexPlan::for($registry->all(), TableNames::forConnection());
 
     foreach ($specs as $spec) {
-        if (str_starts_with($spec->name, 'model_search_keys')) {
+        if (str_starts_with($spec->family, 'keys_')) {
             expect($spec->createSql)->toContain('("partition", ');
         }
     }
@@ -92,33 +93,56 @@ it('writes every key index as a raw concurrent create with the literal predicate
         expect($spec->createSql)->toStartWith('CREATE INDEX CONCURRENTLY IF NOT EXISTS ');
     }
 
-    $byName = array_column(array_map(static fn (IndexSpec $s): array => [$s->name, $s->createSql], $specs), 1, 0);
+    $byName = array_column(array_map(static fn (IndexSpec $s): array => [$s->family, $s->createSql], $specs), 1, 0);
 
-    expect($byName['model_search_keys_key_idx'])->toEndWith('WHERE '.IndexPlan::GENERIC_KEYS)
-        ->and($byName['model_search_keys_name_word_idx'])->toEndWith('WHERE '.IndexPlan::NAME_WORDS)
-        ->and($byName['model_search_keys_key_s0_idx'])->toEndWith('WHERE '.IndexPlan::GENERIC_KEYS.' AND '.IndexPlan::STAGE_ZERO)
-        ->and($byName['model_search_keys_name_word_s0_idx'])->toEndWith('WHERE '.IndexPlan::NAME_WORDS.' AND '.IndexPlan::STAGE_ZERO);
+    expect($byName['keys_key'])->toEndWith('WHERE '.IndexPlan::GENERIC_KEYS)
+        ->and($byName['keys_name_word'])->toEndWith('WHERE '.IndexPlan::NAME_WORDS)
+        ->and($byName['keys_key_s0'])->toEndWith('WHERE '.IndexPlan::GENERIC_KEYS.' AND '.IndexPlan::STAGE_ZERO)
+        ->and($byName['keys_name_word_s0'])->toEndWith('WHERE '.IndexPlan::NAME_WORDS.' AND '.IndexPlan::STAGE_ZERO);
 });
 
 it('index predicates are literal and match the query predicates', function (): void {
     // The query branches build their predicate from these constants (IndexPlan::withStageZero for
     // the stage-zero ones); the indexes the sync created must carry the same predicate.
     $expected = [
-        'model_search_keys_key_idx' => IndexPlan::GENERIC_KEYS,
-        'model_search_keys_reverse_idx' => IndexPlan::GENERIC_KEYS,
-        'model_search_keys_name_word_idx' => IndexPlan::NAME_WORDS,
-        'model_search_keys_key_s0_idx' => IndexPlan::withStageZero(IndexPlan::GENERIC_KEYS),
-        'model_search_keys_reverse_s0_idx' => IndexPlan::withStageZero(IndexPlan::GENERIC_KEYS),
-        'model_search_keys_name_word_s0_idx' => IndexPlan::withStageZero(IndexPlan::NAME_WORDS),
+        'keys_key' => IndexPlan::GENERIC_KEYS,
+        'keys_reverse' => IndexPlan::GENERIC_KEYS,
+        'keys_name_word' => IndexPlan::NAME_WORDS,
+        'keys_key_s0' => IndexPlan::withStageZero(IndexPlan::GENERIC_KEYS),
+        'keys_reverse_s0' => IndexPlan::withStageZero(IndexPlan::GENERIC_KEYS),
+        'keys_name_word_s0' => IndexPlan::withStageZero(IndexPlan::NAME_WORDS),
     ];
 
-    foreach ($expected as $index => $predicate) {
-        expect(liveIndexPredicate($index))->toBe(normalisedPredicate($predicate), $index);
+    $names = [];
+
+    foreach (IndexPlan::for(app(ModelSearchRegistry::class)->all(), TableNames::forConnection()) as $spec) {
+        $names[$spec->family] = $spec->name;
+    }
+
+    foreach ($expected as $family => $predicate) {
+        expect(liveIndexPredicate($names[$family]))->toBe(normalisedPredicate($predicate), $family);
     }
 });
 
+it('puts a short hash of the definition in every index name, so a changed definition is a new name', function (): void {
+    $registry = app(ModelSearchRegistry::class);
+    $plain = IndexPlan::for($registry->all(), TableNames::forConnection());
+    config(['model-search.partition_column' => 'tenant_id']);
+    $partitioned = IndexPlan::for($registry->all(), TableNames::forConnection());
+
+    expect($plain[0]->name)->toMatch('/^model_search_keys_key_[0-9a-f]{8}_idx$/')
+        ->and($partitioned[0]->name)->not->toBe($plain[0]->name)
+        // the trigram index does not depend on the partition: same definition, same name
+        ->and($partitioned[2]->name)->toBe($plain[2]->name);
+});
+
+it('builds STAGE_ZERO from the all-stage constant of the compiled definition', function (): void {
+    expect(IndexPlan::STAGE_ZERO)->toBe('stage < '.CompiledDefinition::ALL_STAGE);
+});
+
 it('creates the names index as a gin trigram index without a pending list', function (): void {
-    $definition = (string) DB::selectOne('SELECT pg_get_indexdef(to_regclass(?)) AS definition', ['model_search_entries_names_gin'])->definition;
+    $name = array_values(array_filter(IndexPlan::for(app(ModelSearchRegistry::class)->all(), TableNames::forConnection()), static fn (IndexSpec $spec): bool => $spec->family === 'entries_names'))[0]->name;
+    $definition = (string) DB::selectOne('SELECT pg_get_indexdef(to_regclass(?)) AS definition', [$name])->definition;
 
     expect($definition)->toContain('USING gin (names gin_trgm_ops)')->toContain('fastupdate=off');
 });

@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Postgres\Schema;
 
-use Happenv\ModelSearch\Compilation\Sql;
-
 /**
  * The trigger function and triggers of one table, rendered to SQL.
  */
@@ -30,23 +28,30 @@ final readonly class RenderedTriggers
     ) {}
 
     /**
-     * The statements that bring the table to this state, in order. Idempotent.
+     * The statements that bring the table to this state, in order. Idempotent, and creating or
+     * replacing only: removing a trigger a table no longer needs is a prune step.
      *
      * @return list<string>
      */
     public function statements(): array
     {
-        $statements = [$this->functionSql, sprintf('COMMENT ON FUNCTION %s() IS %s', $this->qualifiedFunction, TriggerSql::literal(Marker::of($this->functionSql)))];
+        return [$this->functionSql, ...array_values($this->triggers)];
+    }
 
-        foreach ($this->unwanted as $name) {
-            $statements[] = sprintf('DROP TRIGGER IF EXISTS %s ON %s', Sql::ident($name), $this->quotedTable);
-        }
+    /**
+     * The comments to put on the objects once they exist: the marker needs the definition
+     * PostgreSQL reads back, which is only known after the statements ran.
+     *
+     * @return list<array{kind: 'function'|'trigger', name: string, on: string, sql: string}>
+     */
+    public function stamps(): array
+    {
+        $stamps = [['kind' => 'function', 'name' => $this->qualifiedFunction, 'on' => $this->qualifiedFunction, 'sql' => $this->functionSql]];
 
         foreach ($this->triggers as $name => $sql) {
-            $statements[] = $sql;
-            $statements[] = sprintf('COMMENT ON TRIGGER %s ON %s IS %s', Sql::ident($name), $this->quotedTable, TriggerSql::literal(Marker::of($sql)));
+            $stamps[] = ['kind' => 'trigger', 'name' => $name, 'on' => $this->quotedTable, 'sql' => $sql];
         }
 
-        return $statements;
+        return $stamps;
     }
 }

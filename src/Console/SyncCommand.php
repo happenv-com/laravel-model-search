@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Console;
 
 use Happenv\ModelSearch\Exceptions\SchemaNotInstalled;
+use Happenv\ModelSearch\Exceptions\SchemaSyncIncomplete;
 use Happenv\ModelSearch\Postgres\Schema\SchemaChange;
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
 use Illuminate\Console\Command;
@@ -16,7 +17,8 @@ final class SyncCommand extends Command
 {
     protected $signature = 'model-search:sync
         {--check : Report drift and exit with a failure when there is any; change nothing}
-        {--dry-run : Print the DDL that would run; change nothing}';
+        {--dry-run : Print the DDL that would run; change nothing}
+        {--prune : Also drop what no registered definition needs any more (run it once the previous release is gone)}';
 
     protected $description = 'Install and verify the change-capture triggers and the search indexes derived from the registered definitions';
 
@@ -27,8 +29,8 @@ final class SyncCommand extends Command
                 return $this->report($sync);
             }
 
-            $outcome = $sync->apply();
-        } catch (SchemaNotInstalled $exception) {
+            $outcome = $sync->apply((bool) $this->option('prune'));
+        } catch (SchemaNotInstalled|SchemaSyncIncomplete $exception) {
             $this->components->error($exception->getMessage());
 
             return self::FAILURE;
@@ -52,23 +54,34 @@ final class SyncCommand extends Command
     private function report(SchemaSync $sync): int
     {
         $changes = $sync->diff();
-
-        if ($changes === []) {
-            $this->components->info('Triggers and indexes are in sync.');
-
-            return self::SUCCESS;
-        }
+        $obsolete = $sync->obsolete();
+        $dryRun = (bool) $this->option('dry-run');
+        $prune = (bool) $this->option('prune');
 
         foreach ($changes as $change) {
             $this->components->warn($change->describe());
 
-            if ($this->option('dry-run')) {
+            if ($dryRun) {
                 $this->printStatements($change);
             }
         }
 
-        if ($this->option('dry-run')) {
-            $this->components->info(sprintf('%d change(s) pending; nothing was changed.', count($changes)));
+        foreach ($obsolete as $change) {
+            $this->components->warn('prune pending: '.$change->describe());
+
+            if ($dryRun && $prune) {
+                $this->printStatements($change);
+            }
+        }
+
+        if ($dryRun) {
+            $this->components->info(sprintf('%d change(s) pending; nothing was changed.', count($changes) + ($prune ? count($obsolete) : 0)));
+
+            return self::SUCCESS;
+        }
+
+        if ($changes === []) {
+            $this->components->info($obsolete === [] ? 'Triggers and indexes are in sync.' : 'Triggers and indexes are in sync; run with --prune to remove what is no longer planned.');
 
             return self::SUCCESS;
         }

@@ -226,3 +226,26 @@ describe('triggers installed by the migration listener', function (): void {
         expect(loggedChanges())->toBe(['order|'.$order->getKey(), 'order|'.$order->getKey()]);
     });
 });
+
+it('compares columns of a type from another schema, as text', function (): void {
+    // hstore's `=` lives in its own schema, outside the fixed search_path of the trigger function.
+    DB::statement('CREATE SCHEMA ms_ext');
+    DB::statement('CREATE EXTENSION hstore SCHEMA ms_ext');
+    DB::statement('ALTER TABLE orders ADD COLUMN attrs ms_ext.hstore');
+
+    ConfigurableOrderSearch::$watching = ['state', 'attrs'];
+    ConfigurableOrderSearch::$fields = [SearchField::key('signature'), SearchField::name('customer_name')];
+    $registry = new ModelSearchRegistry;
+    $registry->register(ConfigurableOrderSearch::class);
+    (new SchemaSync($registry))->apply();
+
+    $order = insertOrder();
+    clearChanges();
+
+    DB::statement("UPDATE orders SET attrs = 'a=>1'::ms_ext.hstore WHERE id = ?", [$order]);
+    expect(loggedChanges())->toBe(['order|'.$order]);
+
+    clearChanges();
+    DB::statement("UPDATE orders SET attrs = 'a=>1'::ms_ext.hstore WHERE id = ?", [$order]);
+    expect(loggedChanges())->toBe([]);
+});

@@ -13,6 +13,14 @@ use Illuminate\Support\Facades\Schema;
  * The projection tables. Indexes and triggers are NOT created here: they are derived from the
  * registered definitions and installed by `model-search:sync` (also run after every migration),
  * with `CREATE INDEX CONCURRENTLY`, which cannot run inside a migration transaction.
+ *
+ * Primary keys stay `(subject_type, subject_id)` also for partitioned setups: the partition column
+ * is nullable and ids are unique per source table. The triggers write `changes.partition = NULL`;
+ * the drain derives the partition from the root row.
+ *
+ * Privileges: the role that runs the sync owns these tables. The roles that write to the watched
+ * tables need INSERT on the changes table (the triggers run as the invoker), and UPDATE on the
+ * state table to TRUNCATE a watched table.
  */
 return new class extends Migration
 {

@@ -35,6 +35,8 @@ final class ConfigurableOrderSearch extends ModelSearch
 
     public static int $definitionVersion = 1;
 
+    public static ?string $partition = null;
+
     public static function reset(): void
     {
         self::$fields = null;
@@ -44,6 +46,7 @@ final class ConfigurableOrderSearch extends ModelSearch
         self::$stageLabel = 'Open';
         self::$sortAt = null;
         self::$definitionVersion = 1;
+        self::$partition = null;
     }
 
     public function fields(): array
@@ -72,6 +75,11 @@ final class ConfigurableOrderSearch extends ModelSearch
     public function sortAt(): ?string
     {
         return self::$sortAt;
+    }
+
+    public function partition(): ?string
+    {
+        return self::$partition;
     }
 
     public function version(): int

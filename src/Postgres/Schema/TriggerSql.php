@@ -14,7 +14,18 @@ use InvalidArgumentException;
  * One plpgsql function per table branches on TG_OP and, in each branch, touches only the record
  * that event has: NEW on INSERT, OLD and NEW on UPDATE, OLD on DELETE, and neither on TRUNCATE.
  * The function is SECURITY INVOKER with a fixed search_path, so every object it names is
- * schema-qualified.
+ * schema-qualified. Columns are compared as text, never with the type's own `=`: that operator may
+ * live in a schema outside the fixed search_path (an extension type such as hstore), and `json` has
+ * none. Two values that print the same are the same for the purposes of the index.
+ *
+ * The role that writes to a watched table needs INSERT on the changes table, and, for a TRUNCATE
+ * of a watched table, UPDATE on the state table, because the function runs with the privileges of
+ * the invoker.
+ *
+ * The TRUNCATE branch updates the state rows of the root types that read the table. It is rare and
+ * takes an ACCESS EXCLUSIVE lock on the truncated table already; should it ever meet a drain
+ * updating the same state row, the deadlock detector resolves it and the truncate is retried by
+ * the caller, so no extra locking order is imposed.
  *
  * Two shapes of watching (see {@see WatchedTable}):
  * - child: the row holds a foreign key to its parent; the parent is logged (the old and the new
@@ -182,7 +193,7 @@ final readonly class TriggerSql
         return [
             sprintf('IF %s THEN', implode(' OR ', $changed)),
             sprintf('    IF %s THEN %s END IF;', $old, $this->insert($changes, $entry, 'OLD')),
-            sprintf('    IF %s AND NOT (%s AND OLD.%s IS NOT DISTINCT FROM NEW.%s) THEN %s END IF;', $new, $old, $key, $key, $this->insert($changes, $entry, 'NEW')),
+            sprintf('    IF %s AND NOT (%s AND OLD.%s::text IS NOT DISTINCT FROM NEW.%s::text) THEN %s END IF;', $new, $old, $key, $key, $this->insert($changes, $entry, 'NEW')),
             'END IF;',
         ];
     }
@@ -257,7 +268,7 @@ final readonly class TriggerSql
     {
         $quoted = Sql::ident($column);
 
-        return sprintf('OLD.%s IS DISTINCT FROM NEW.%s', $quoted, $quoted);
+        return sprintf('OLD.%s::text IS DISTINCT FROM NEW.%s::text', $quoted, $quoted);
     }
 
     /**

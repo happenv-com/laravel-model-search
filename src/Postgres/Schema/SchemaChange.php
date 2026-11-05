@@ -16,6 +16,7 @@ final readonly class SchemaChange
      * @param  bool  $transactional  False for CREATE/DROP INDEX CONCURRENTLY, which cannot run in a transaction.
      * @param  list<string>  $relations  Tables (as SQL) whose owner must be the acting role.
      * @param  list<string>  $routines  Functions (as SQL, with arguments) whose owner must be the acting role.
+     * @param  list<array{kind: 'function'|'trigger', name: string, on: string, sql: string}>  $stamps  Comments to write once the statements ran.
      */
     public function __construct(
         public string $kind,
@@ -26,6 +27,7 @@ final readonly class SchemaChange
         public bool $transactional,
         public array $relations = [],
         public array $routines = [],
+        public array $stamps = [],
     ) {}
 
     public function describe(): string
