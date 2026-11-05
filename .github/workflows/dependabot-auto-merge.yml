@@ -1,0 +1,32 @@
+name: dependabot-auto-merge
+
+# pull_request_target is required so the job can read Dependabot's secrets and
+# merge the PR. No repository code is checked out or executed here, so the
+# untrusted-head-ref risk that normally makes this trigger dangerous does not
+# apply.
+on: pull_request_target # zizmor: ignore[dangerous-triggers]
+
+permissions:
+  contents: read
+
+jobs:
+  dependabot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    # github.actor is spoofable; the PR author on the event payload is not.
+    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+    steps:
+      - name: Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Auto-merge Dependabot PRs for semver-minor and semver-patch updates
+        if: ${{ steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch' }}
+        run: gh pr merge --auto --merge "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

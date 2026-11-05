@@ -1,0 +1,8 @@
+/vendor
+/composer.lock
+/.phpunit.cache
+/phpunit.xml
+.DS_Store
+
+# Composer credentials for the private packeton registry — never commit.
+auth.json

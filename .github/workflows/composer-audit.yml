@@ -1,0 +1,44 @@
+name: composer-audit
+
+on:
+  push:
+    paths:
+      - 'composer.json'
+      - 'composer.lock'
+      - '.github/workflows/composer-audit.yml'
+  pull_request:
+  schedule:
+    # Catch newly disclosed advisories even without code changes (Mon 06:00 UTC).
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.5'
+          coverage: none
+
+      # composer.lock is not committed for this package, so the audit resolves a
+      # fresh lock first and then audits it.
+      - name: Install dependencies
+        run: composer update --prefer-stable --prefer-dist --no-interaction --no-progress
+
+      - name: Run composer audit
+        run: composer audit --abandoned=report --ansi

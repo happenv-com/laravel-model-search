@@ -1,0 +1,38 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions up to date (paired with the zizmor
+  # workflow, which enforces the pinning).
+  - package-ecosystem: github-actions
+    directory: /
+    # Supply-chain guard: never open a PR the moment a version lands. A compromised
+    # release is usually yanked within days, so waiting gives that window a chance to
+    # close before the update reaches a branch. Majors wait longest — they get the most
+    # scrutiny anyway, and their PRs are never auto-merged.
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+
+  - package-ecosystem: composer
+    directory: /
+    # Supply-chain guard: never open a PR the moment a version lands. A compromised
+    # release is usually yanked within days, so waiting gives that window a chance to
+    # close before the update reaches a branch. Majors wait longest — they get the most
+    # scrutiny anyway, and their PRs are never auto-merged.
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    schedule:
+      interval: weekly
+    groups:
+      dev-dependencies:
+        dependency-type: development

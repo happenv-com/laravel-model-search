@@ -1,0 +1,32 @@
+name: zizmor
+
+on:
+  push:
+    paths:
+      - '.github/workflows/**'
+      - '.github/dependabot.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/dependabot.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          # These repositories are PRIVATE, where uploading SARIF to the security tab
+          # needs GitHub Advanced Security; without it the action's upload step fails
+          # with "Resource not accessible by integration" even though the audit itself
+          # passed. Turn the upload off and let a finding fail the job directly.
+          advanced-security: false

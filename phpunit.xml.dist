@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit bootstrap="vendor/autoload.php" colors="true" cacheDirectory=".phpunit.cache">
+    <testsuites>
+        <testsuite name="Package">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="DB_HOST" value="127.0.0.1"/>
+        <env name="DB_PORT" value="5432"/>
+        <env name="DB_DATABASE" value="postgres"/>
+        <env name="DB_USERNAME" value="postgres"/>
+        <env name="DB_PASSWORD" value="postgres"/>
+    </php>
+</phpunit>

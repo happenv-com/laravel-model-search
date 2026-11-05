@@ -1,0 +1,54 @@
+{
+    "name": "happenv-com/laravel-model-search",
+    "description": "Universal record search for Laravel models, backed by PostgreSQL trigram indexes.",
+    "license": "MIT",
+    "type": "library",
+    "require": {
+        "illuminate/console": "^12.0|^13.0",
+        "illuminate/contracts": "^12.0|^13.0",
+        "illuminate/database": "^12.0|^13.0",
+        "illuminate/support": "^12.0|^13.0",
+        "nesbot/carbon": "^3.0",
+        "php": "^8.4"
+    },
+    "require-dev": {
+        "ergebnis/composer-normalize": "^2.52",
+        "laravel/pint": "^1.0",
+        "orchestra/testbench": "^10.0|^11.0",
+        "pestphp/pest": "^3.7|^4.0",
+        "pestphp/pest-plugin-laravel": "^3.0|^4.0",
+        "phpstan/phpstan": "^2.0",
+        "rector/rector": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Happenv\\ModelSearch\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Happenv\\ModelSearch\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Happenv\\ModelSearch\\ModelSearchServiceProvider"
+            ]
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "ergebnis/composer-normalize": true
+        }
+    },
+    "scripts": {
+        "test": "pest",
+        "lint": "pint --test",
+        "analyse": "phpstan analyse"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

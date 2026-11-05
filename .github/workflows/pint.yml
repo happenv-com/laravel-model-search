@@ -1,0 +1,48 @@
+name: pint
+
+on:
+  push:
+    paths:
+      - '**.php'
+      - 'pint.json'
+      - '.github/workflows/pint.yml'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pint:
+    name: pint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.composer/cache/files
+          key: composer-pint-${{ hashFiles('composer.json') }}
+          restore-keys: |
+            composer-pint-
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.5'
+          coverage: none
+
+      - name: Install dependencies
+        run: composer update --prefer-stable --prefer-dist --no-interaction --no-progress
+
+      # Reports only. Style is fixed by running `vendor/bin/pint` locally, so
+      # CI never pushes commits back to the branch.
+      - name: Run Pint
+        run: ./vendor/bin/pint --test
