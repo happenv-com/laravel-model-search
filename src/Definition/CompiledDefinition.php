@@ -10,6 +10,9 @@ use Happenv\ModelSearch\Compilation\WatchedTable;
 use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Illuminate\Database\Eloquent\Model;
 
+/**
+ * @internal
+ */
 final readonly class CompiledDefinition
 {
     /** The stage of a record that falls in no constrained stage. */

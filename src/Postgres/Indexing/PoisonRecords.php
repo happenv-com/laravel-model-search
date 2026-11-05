@@ -15,6 +15,8 @@ use Throwable;
  * The failures table: records whose projection could not be computed even on their own.
  *
  * Only the exception CLASS is kept, never its message: the message may quote the record's data.
+ *
+ * @internal
  */
 final readonly class PoisonRecords
 {

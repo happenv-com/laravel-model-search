@@ -58,6 +58,8 @@ use Illuminate\Support\Str;
  * search connection of {@see SearchSession}, not on the host's: on PostgreSQL in a transaction with
  * the session's timeout, with the phrase sent as a parameter and no listener or query log of the
  * host seeing the statement.
+ *
+ * @internal
  */
 final readonly class DatabaseDriver implements Driver
 {
@@ -357,7 +359,8 @@ SQL;
         return match ($mode) {
             Mode::Exact => 1,
             Mode::Prefix => $forTable ? 4 : 3,
-            Mode::Suffix, Mode::Infix => 6,
+            Mode::Suffix => 4,
+            Mode::Infix => 6,
             Mode::Fuzzy => 3,
             Mode::FullText => PHP_INT_MAX,
         };

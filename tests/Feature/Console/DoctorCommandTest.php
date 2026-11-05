@@ -3,11 +3,15 @@
 declare(strict_types=1);
 
 use Happenv\ModelSearch\Console\DoctorCommand;
+use Happenv\ModelSearch\Definition\Mode;
+use Happenv\ModelSearch\Definition\SearchField;
 use Happenv\ModelSearch\Postgres\Doctor\Doctor;
 use Happenv\ModelSearch\Postgres\Indexing\SearchIndexer;
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Postgres\Session\PrivacyGate;
+use Happenv\ModelSearch\Registry\ModelSearchRegistry;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -144,6 +148,10 @@ it('reports a type that is not installed or installed for another definition', f
     sort($codes);
 
     expect($codes)->toBe(['fingerprint-differs', 'type-not-installed']);
+
+    $differs = collect(app(Doctor::class)->inspect())->firstWhere('code', 'fingerprint-differs');
+
+    expect($differs->message)->toContain('ModelSearch::version()');
 });
 
 it('reports a privacy finding and still runs the key checks when parameter logging cannot be switched off', function (): void {
@@ -165,4 +173,20 @@ it('puts the parameter logging setting back after the key checks', function (): 
     dcCodes();
 
     expect((string) DB::selectOne("SELECT current_setting('log_parameter_max_length_on_error') AS value")->value)->toBe('77B');
+});
+
+it('reports a key field that only the database driver can search by Infix', function (): void {
+    ConfigurableOrderSearch::$fields = [SearchField::key('signature')->matches(Mode::Infix), SearchField::key('external_number')];
+    $registry = new ModelSearchRegistry;
+    $registry->register(ConfigurableOrderSearch::class);
+    app()->instance(ModelSearchRegistry::class, $registry);
+
+    $infix = collect(app(Doctor::class)->inspect())->firstWhere('code', 'infix-ignored');
+
+    expect($infix->subject)->toBe('order')
+        ->and($infix->message)->toContain('signature')->toContain('postgres driver');
+
+    config(['model-search.driver' => 'database']);
+
+    expect(collect(app(Doctor::class)->inspect())->firstWhere('code', 'infix-ignored'))->toBeNull();
 });

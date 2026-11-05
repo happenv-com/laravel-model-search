@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Tests\Fixtures;
 
-use Happenv\ModelSearch\Facades\ModelSearch;
+use Happenv\ModelSearch\Facades\ModelSearches;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Address;
 use Happenv\ModelSearch\Tests\Fixtures\Models\CarrierUnit;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Customer;
@@ -40,11 +40,11 @@ final class FixtureSearchServiceProvider extends ServiceProvider
             'customer' => Customer::class,
         ]);
 
-        ModelSearch::register(OrderSearch::class);
-        ModelSearch::register(ParcelSearch::class);
-        ModelSearch::register(ProductSearch::class);
-        ModelSearch::register(InvoiceSearch::class);
-        ModelSearch::register(CustomerSearch::class);
-        ModelSearch::extend(MarketOrderSearchExtension::class);
+        ModelSearches::register(OrderSearch::class);
+        ModelSearches::register(ParcelSearch::class);
+        ModelSearches::register(ProductSearch::class);
+        ModelSearches::register(InvoiceSearch::class);
+        ModelSearches::register(CustomerSearch::class);
+        ModelSearches::extend(MarketOrderSearchExtension::class);
     }
 }

@@ -23,6 +23,8 @@ use Illuminate\Support\Facades\DB;
  * transaction (a test harness, a request that writes and searches). The price is that a search
  * always runs on the host's write PDO, so under read/write splitting searches go to the primary;
  * the clone reads from it too, so the privacy gate inspects the very server the search runs on.
+ *
+ * @internal
  */
 class SearchConnectionFactory
 {

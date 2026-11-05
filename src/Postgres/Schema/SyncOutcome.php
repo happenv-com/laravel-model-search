@@ -9,6 +9,8 @@ use Happenv\ModelSearch\Exceptions\InstallRefused;
 /**
  * What {@see SchemaSync::apply()} did: the changes it applied, or why it did nothing, and what
  * happened to the install of each registered type.
+ *
+ * @internal
  */
 final readonly class SyncOutcome
 {

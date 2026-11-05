@@ -5,25 +5,26 @@ declare(strict_types=1);
 use Happenv\ModelSearch\Drivers\DatabaseDriver;
 use Happenv\ModelSearch\Drivers\Driver;
 use Happenv\ModelSearch\Drivers\DriverManager;
-use Happenv\ModelSearch\Facades\ModelSearch;
+use Happenv\ModelSearch\Facades\ModelSearches;
 use Happenv\ModelSearch\Postgres\Query\PostgresDriver;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Product;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ProductSearch;
+use Illuminate\Foundation\Auth\User;
 
 covers(DriverManager::class);
 
 it('resolves the postgres driver', function (): void {
     config(['model-search.driver' => 'postgres']);
 
-    expect(resolve(DriverManager::class)->for(ModelSearch::for(Order::class)))->toBeInstanceOf(PostgresDriver::class);
+    expect(resolve(DriverManager::class)->for(ModelSearches::for(Order::class)))->toBeInstanceOf(PostgresDriver::class);
 });
 
 it('resolves the database driver', function (): void {
     config(['model-search.driver' => 'database']);
 
-    expect(resolve(DriverManager::class)->for(ModelSearch::for(Order::class)))->toBeInstanceOf(DatabaseDriver::class);
+    expect(resolve(DriverManager::class)->for(ModelSearches::for(Order::class)))->toBeInstanceOf(DatabaseDriver::class);
 });
 
 it('resolves a registered driver by name', function (): void {
@@ -31,13 +32,13 @@ it('resolves a registered driver by name', function (): void {
     $driver = Mockery::mock(Driver::class);
     resolve(DriverManager::class)->extend('custom', static fn () => $driver);
 
-    expect(resolve(DriverManager::class)->for(ModelSearch::for(Order::class)))->toBe($driver);
+    expect(resolve(DriverManager::class)->for(ModelSearches::for(Order::class)))->toBe($driver);
 });
 
 it('refuses a driver it does not know', function (): void {
     config(['model-search.driver' => 'nonsense']);
 
-    expect(fn () => resolve(DriverManager::class)->for(ModelSearch::for(Order::class)))->toThrow(InvalidArgumentException::class);
+    expect(fn () => resolve(DriverManager::class)->for(ModelSearches::for(Order::class)))->toThrow(InvalidArgumentException::class);
 });
 
 it('shares one manager', function (): void {
@@ -57,4 +58,19 @@ it('answers a palette one query at a time for a driver that does not read the in
     expect(array_keys($palette))->toBe(['order', 'product'])
         ->and(count($palette['order']))->toBe(1)
         ->and(count($palette['product']))->toBe(1);
+});
+
+it('charges the viewer once for a palette whatever the driver', function (): void {
+    config(['model-search.driver' => 'database', 'model-search.rate_limit' => ['max_attempts' => 1, 'decay_seconds' => 60]]);
+    Order::create(['signature' => 'ABC-1']);
+    Product::create(['sku' => 'ABC-1']);
+    $viewer = new User;
+    $viewer->id = 7;
+
+    $palette = resolve(DriverManager::class)->palette([
+        OrderSearch::query('ABC-1')->within(Order::query())->forUser($viewer),
+        ProductSearch::query('ABC-1')->within(Product::query())->forUser($viewer),
+    ]);
+
+    expect(array_keys($palette))->toBe(['order', 'product']);
 });

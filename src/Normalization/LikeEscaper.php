@@ -7,6 +7,8 @@ namespace Happenv\ModelSearch\Normalization;
 /**
  * Escapes a value for a PostgreSQL `LIKE ... ESCAPE '\'` pattern so that `%`, `_` and `\` match
  * literally.
+ *
+ * @internal
  */
 final class LikeEscaper
 {

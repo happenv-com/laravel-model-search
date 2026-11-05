@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Postgres\Indexing;
 
+/**
+ * @internal
+ */
 enum InstallOutcome: string
 {
     /** The type had no state row; a rebuild is pending. */

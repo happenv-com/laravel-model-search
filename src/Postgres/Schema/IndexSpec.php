@@ -9,6 +9,8 @@ namespace Happenv\ModelSearch\Postgres\Schema;
  *
  * The marker with the hash of the statement is stored as the index comment, so a changed definition (a new
  * predicate, a leading partition column) is detected as drift and the index is rebuilt.
+ *
+ * @internal
  */
 final readonly class IndexSpec
 {

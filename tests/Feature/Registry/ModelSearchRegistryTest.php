@@ -16,7 +16,7 @@ use Happenv\ModelSearch\Exceptions\InvalidStageConstraint;
 use Happenv\ModelSearch\Exceptions\UnknownDefinition;
 use Happenv\ModelSearch\Exceptions\UnsupportedRelation;
 use Happenv\ModelSearch\Exceptions\UnsupportedStages;
-use Happenv\ModelSearch\Facades\ModelSearch as ModelSearchFacade;
+use Happenv\ModelSearch\Facades\ModelSearches as ModelSearchFacade;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Happenv\ModelSearch\Tests\Fixtures\Builders\OrderBuilder;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Customer;

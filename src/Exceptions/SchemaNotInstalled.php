@@ -9,4 +9,4 @@ use RuntimeException;
 /**
  * Raised when the package's own tables do not exist yet, so there is nothing to attach triggers and indexes to.
  */
-final class SchemaNotInstalled extends RuntimeException {}
+final class SchemaNotInstalled extends RuntimeException implements ModelSearchException {}

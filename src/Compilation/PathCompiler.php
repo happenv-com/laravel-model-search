@@ -26,6 +26,8 @@ use ReflectionNamedType;
  * Global scopes are ignored while indexing, except soft deletes and the scope classes the
  * definition lists: a scope that reads the viewer would index a different set than a query sees.
  * A relation must declare its return type, so a method that is not a relation is never called.
+ *
+ * @internal
  */
 final class PathCompiler
 {

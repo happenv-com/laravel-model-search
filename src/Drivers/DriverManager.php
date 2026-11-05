@@ -7,12 +7,15 @@ namespace Happenv\ModelSearch\Drivers;
 use Closure;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Postgres\Query\PostgresDriver;
+use Happenv\ModelSearch\Query\ChargeOnce;
 use Happenv\ModelSearch\Query\SearchQuery;
 use Happenv\ModelSearch\Query\SearchResults;
 use InvalidArgumentException;
 
 /**
  * Resolves the driver that serves a definition, by the `model-search.driver` setting.
+ *
+ * @internal
  */
 final class DriverManager
 {
@@ -20,6 +23,12 @@ final class DriverManager
     private array $custom = [];
 
     /**
+     * Registers a driver under the name `model-search.driver` selects it by.
+     *
+     * Not public API in 0.x: a driver needs accessors of {@see SearchQuery} that are internal and may change.
+     *
+     * @internal
+     *
      * @param  Closure(CompiledDefinition): Driver  $factory
      */
     public function extend(string $name, Closure $factory): void
@@ -55,8 +64,11 @@ final class DriverManager
         $results = [];
         $together = [];
         $postgres = null;
+        $charge = new ChargeOnce;
 
         foreach ($queries as $query) {
+            // One keystroke of one viewer costs one attempt, however the drivers split the work.
+            $query = $query->sharingCharge($charge);
             $alias = $query->definition()->morphAlias;
             $driver = $this->for($query->definition());
             $results[$alias] = null;
@@ -72,7 +84,7 @@ final class DriverManager
         }
 
         if ($postgres instanceof PostgresDriver) {
-            $results = [...$results, ...$postgres->palette($together)];
+            $results = [...$results, ...$postgres->palette($together, $charge)];
         }
 
         return array_filter($results, static fn (?SearchResults $outcome): bool => $outcome instanceof SearchResults);

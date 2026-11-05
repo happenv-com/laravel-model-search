@@ -57,6 +57,15 @@ it('installs every registered type once its triggers and indexes are in place', 
     expect(iwSync()->apply()->installs['order'])->toBe('unchanged');
 });
 
+it('installs nothing on a connection none of the definitions watch', function (): void {
+    config(['database.connections.second' => config('database.connections.pgsql')]);
+
+    $outcome = (new SchemaSync(app(ModelSearchRegistry::class), 'second'))->apply();
+
+    expect($outcome->installs)->toBe([])
+        ->and(DB::table(iwState())->count())->toBe(0);
+});
+
 it('migrate, drain, ready: the listener leaves a searchable index', function (): void {
     $id = (string) Str::uuid();
     DB::table('orders')->insert(['id' => $id, 'signature' => 'MIG-1', 'customer_name' => 'Ann Kowalska', 'state' => 'unshipped']);
@@ -121,7 +130,8 @@ it('the sync command fails on a refusal, the migration listener only warns about
 it('a foreign fingerprint at the same version fails the listener too', function (): void {
     DB::table(iwState())->insert(['subject_type' => 'order', 'definition_fingerprint' => 'other', 'definition_version' => 1, 'installed_at' => now()]);
 
-    expect(fn () => app(SyncAfterMigrations::class)->handle(new MigrationsEnded('up', [])))->toThrow(InstallRefused::class, 'bump');
+    expect(fn () => app(SyncAfterMigrations::class)->handle(new MigrationsEnded('up', [])))->toThrow(InstallRefused::class, 'bump ModelSearch::version()')
+        ->and(fn () => app(SyncAfterMigrations::class)->handle(new MigrationsEnded('up', [])))->toThrow(InstallRefused::class, 'name_words');
 });
 
 it('--check lists types that are not installed or whose fingerprint differs', function (): void {

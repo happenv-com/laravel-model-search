@@ -17,6 +17,8 @@ use Illuminate\Database\Query\Builder as QueryBuilder;
  *
  * Time-relative values are refused when they are date objects. A time-relative constraint passed as a
  * plain string (for example `->toDateString()`) cannot be detected and is equally wrong.
+ *
+ * @internal
  */
 final class StageConstraintInspector
 {

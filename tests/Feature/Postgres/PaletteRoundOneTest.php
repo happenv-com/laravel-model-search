@@ -1089,6 +1089,20 @@ describe('readiness', function (): void {
             ->and(prIndexStatements($recorder))->toBe([]);
     });
 
+    it('serves a ready type from the existing index while a rebuild is pending, and says the index is building', function (): void {
+        Order::create(['signature' => 'ABC-1']);
+        prIndex();
+        $recorder = prRecorder();
+        DB::table(TableNames::forConnection()->state())->where('subject_type', 'order')->update(['rebuild_cursor' => '']);
+        (new IndexState)->forget('order');
+
+        $results = prOrders('ABC-1')->get();
+
+        expect(prSignatures($results))->toBe(['ABC-1'])
+            ->and($results->indexBuilding)->toBeTrue()
+            ->and(prIndexStatements($recorder))->toHaveCount(1);
+    });
+
     it('does not say the index is building when it is ready', function (): void {
         Order::create(['signature' => 'ABC-1']);
         prIndex();

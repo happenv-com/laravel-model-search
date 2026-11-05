@@ -13,6 +13,8 @@ namespace Happenv\ModelSearch\Postgres\Schema;
  * the install. The marker identifies what the sync may touch; the two hashes detect an object that
  * no longer matches the plan (a changed plan) or was edited in place behind the comment (a changed
  * live definition: CREATE OR REPLACE keeps the object, and with it the comment).
+ *
+ * @internal
  */
 final class Marker
 {

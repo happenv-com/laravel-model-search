@@ -18,6 +18,8 @@ use Illuminate\Database\Eloquent\Model;
  * A name word is a word of any name of the record whose field matches by prefix (only those have
  * their words indexed), so it is revealed only when EVERY such name field allows it. A kind the
  * definition does not know is hidden.
+ *
+ * @internal
  */
 final readonly class RevealPolicy
 {

@@ -19,6 +19,8 @@ use Illuminate\Support\Facades\Log;
  * non-zero by design, with the schema migrated and part of the derived objects still missing: run
  * `model-search:sync` to finish. The same goes for a missing extension or a role that does not own
  * the tables.
+ *
+ * @internal
  */
 final readonly class SyncAfterMigrations
 {

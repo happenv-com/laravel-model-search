@@ -7,6 +7,8 @@ namespace Happenv\ModelSearch\Compilation;
 /**
  * A field path compiled into SQL: what the field contributes for given roots, which tables and
  * columns the contribution depends on, and how to get from a changed node back to the roots.
+ *
+ * @internal
  */
 final readonly class CompiledPath
 {

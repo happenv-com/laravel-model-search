@@ -6,6 +6,8 @@ namespace Happenv\ModelSearch\Postgres\Schema;
 
 /**
  * The trigger function and triggers of one table, rendered to SQL.
+ *
+ * @internal
  */
 final readonly class RenderedTriggers
 {

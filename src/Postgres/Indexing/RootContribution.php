@@ -6,6 +6,8 @@ namespace Happenv\ModelSearch\Postgres\Indexing;
 
 /**
  * Everything the index holds for one root record: its entry and its key rows.
+ *
+ * @internal
  */
 final readonly class RootContribution
 {

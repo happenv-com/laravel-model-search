@@ -6,6 +6,8 @@ namespace Happenv\ModelSearch\Postgres\Schema;
 
 /**
  * The desired state of the derived schema objects, independent of what the database has now.
+ *
+ * @internal
  */
 final readonly class SchemaPlan
 {

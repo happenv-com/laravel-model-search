@@ -55,6 +55,8 @@ use Throwable;
  * Privileges: the role running the sync must own the watched tables and the package tables (or be
  * a member of their owner). The trigger functions are SECURITY INVOKER, so the roles that write to
  * watched tables need INSERT on the changes table, and UPDATE on the state table to TRUNCATE one.
+ *
+ * @internal
  */
 final readonly class SchemaSync
 {
@@ -241,6 +243,11 @@ final readonly class SchemaSync
         foreach ($this->registry->all() as $definition) {
             $tables = array_map(static fn (WatchedTable $table): string => $table->quotedTable, array_filter($definition->watchedTables(), static fn (WatchedTable $table): bool => $table->connection === $connection));
 
+            if ($tables === []) {
+                // Nothing this connection watches: the definition belongs to another database's sync.
+                continue;
+            }
+
             if ($indexesLeft || array_intersect($tables, array_keys($blockedTables)) !== []) {
                 $installs[$definition->morphAlias] = 'skipped';
 
@@ -270,7 +277,13 @@ final readonly class SchemaSync
         $state = new IndexState($this->connection);
         $reasons = [];
 
+        $connection = $this->db()->getName();
+
         foreach ($this->registry->all() as $definition) {
+            if (array_all($definition->watchedTables(), static fn (WatchedTable $table): bool => $table->connection !== $connection)) {
+                continue;
+            }
+
             $row = $state->find($definition->morphAlias);
 
             if ($row === null) {

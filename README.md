@@ -76,25 +76,27 @@ final class OrderSearch extends ModelSearch
 Register definitions (and extensions) with the registry, for instance in a service provider:
 
 ```php
-use Happenv\ModelSearch\Facades\ModelSearch;
+use Happenv\ModelSearch\Facades\ModelSearches;
 
-ModelSearch::register(OrderSearch::class);
-ModelSearch::extend(MarketOrderSearchExtension::class);
+ModelSearches::register(OrderSearch::class);
+ModelSearches::extend(MarketOrderSearchExtension::class);
 ```
 
-If you use `laravel-true-modular`, the `Happenv\ModelSearch\Integration\TrueModular\RegistersModelSearches` provider trait offers `hasModelSearches([...])` / `hasModelSearchExtensions([...])`; call `processModelSearches()` from the provider's `moduleInitialized()` hook, or nothing is registered.
+If you use `laravel-true-modular`, the `Happenv\ModelSearch\Integration\TrueModular\RegistersModelSearches` provider trait offers `hasModelSearches([...])` / `hasModelSearchExtensions([...])`; call `processModelSearches()` from the provider's `moduleInitialized()` hook, or nothing is registered. **Experimental:** this two-step registration may change before 1.0.
+
+The facade also answers two questions about the index of a model: `ModelSearches::isReady(Order::class)` (the index has been built completely at least once, so searches are served from it) and `ModelSearches::isRebuilding(Order::class)` (a rebuild is pending: right after installing, or after a definition changed). Both are cached for a few seconds per connection and database.
 
 ### Fields
 
 | Field | Matched by | Notes |
 |---|---|---|
-| `SearchField::key($path)` | `Exact`, `Prefix`, `Suffix` (opt-in `Infix`) | Identifiers: numbers, e-mails, phones, SKUs. Separators and case are folded. |
+| `SearchField::key($path)` | `Exact`, `Prefix`, `Suffix` (opt-in `Infix`, `database` driver only) | Identifiers: numbers, e-mails, phones, SKUs. Separators and case are folded. |
 | `SearchField::name($path)` | `Prefix` on the words of the name, `Fuzzy` on demand | People, companies, products. |
 | `SearchField::via($relation, $kinds = [])` | the modes of the related fields | Finds a record through a related record, one `BelongsTo` hop. |
 
 `$path` is a column of the model or a dotted path through relations. The **kind** of a field defaults to the last segment of its path (`billingAddress.phone` is `phone`); override it with `->kind()`. `name_word` is reserved. Further modifiers:
 
-- `matches(Mode ...)` narrows (or, for keys, adds `Infix`) the modes. A name field's `Prefix` is what makes its words searchable; `Fuzzy` is read only by `similar()`.
+- `matches(Mode ...)` narrows (or, for keys, adds `Infix`) the modes. **`Infix` works only in the `database` driver**: the `postgres` driver has no index for it and ignores it, so a key field declared for `Infix` alone never matches there (the doctor reports it). A name field's `Prefix` is what makes its words searchable; `Fuzzy` is read only by `similar()`.
 - `label(Closure(): string)`: labels are closures, so they resolve in the viewer's locale, not at boot.
 - `exactOnSource()`: also reads the model's own column for exact matches, so a record created a second ago is found by its exact number before the index has seen it. Only on own-table keys that match `Exact`.
 - `normalizeUsing(Normalizer)`: your own normalization for the stored and the searched form.
@@ -154,7 +156,8 @@ foreach ($results as $result) {
 }
 
 $results->timedOut;       // the search ran out of time: an empty list is NOT "nothing found"
-$results->indexBuilding;  // part of the index is not built yet, the answer may be partial
+$results->indexBuilding;  // part of the index is not built or is being rebuilt, the answer may be partial
+$results->stage;          // the stage key the results come from; null when stages did not apply
 ```
 
 ### Scope: fail-closed
@@ -193,6 +196,7 @@ Other narrowing methods (all immutable; each returns a new query):
 
 ### How a phrase is understood
 
+- Minimum lengths: `Prefix` needs 3 characters (4 when narrowing a table with `apply()`), `Suffix` 4 in both drivers, the `database` driver's `Infix` 6.
 - A phrase is normalized (case, diacritics, separators). **A phrase that normalizes to nothing runs no query and costs no rate-limit attempt.** The same holds for stored values: text that ASCII folding reduces to nothing (**CJK, emoji**, invalid UTF-8) is not indexed, so it is **not searchable**; keep such columns out of definitions or give them a `normalizeUsing()` normalizer.
 - An **identifier-shaped phrase** (contains `@`, or at least `identifier_rule.digit_share` of its letters and digits are digits) does not search names.
 - Name matching is by **words**: each word of a name (split on whitespace and hyphens; apostrophes dropped; `_ . / # + , : ;` separate words) is indexed, up to `name_words.max_per_record` per record, from `name_words.min_length` characters. `john smi` matches "John Smith" by the prefix of each word. Prefix matching needs at least 3 characters in the longest query word (4 when narrowing a table with `apply()`).
@@ -207,7 +211,7 @@ $query = OrderSearch::query($phrase)
     ->apply(Order::query()->latest());   // changed in place and returned
 ```
 
-Every matching record, unranked; pagination, counting and sorting stay with the table. The matching keys are resolved on the search connection and handed to your query as a bound key list, so an `orWhere` on your table query cannot widen the result. A phrase that matches too much throws `SearchTooBroad`: either more than `apply.max_ids` rows in a branch (this counts rows per branch, so the cap bounds the work), or a `via` field with more than 50 parents. Catch it and ask for a longer phrase. `apply()` never returns a silently partial list.
+Every matching record, unranked; pagination, counting and sorting stay with the table. The models you get back are yours: the narrowing adds no attribute of its own (a query without explicit columns is selected as `<table>.*`). The matching keys are resolved on the search connection and handed to your query as a bound key list, so an `orWhere` on your table query cannot widen the result. A phrase that matches too much throws `SearchTooBroad`: either more than `apply.max_ids` rows in a branch (this counts rows per branch, so the cap bounds the work), or a `via` field with more than 50 parents. Catch it and ask for a longer phrase. `apply()` never returns a silently partial list.
 
 ### `similar()`
 
@@ -219,7 +223,7 @@ $similar = OrderSearch::query($phrase)->within($host)->similar();
 
 ### `candidates()`
 
-Raw rows (`type`, `id`, `mode`, `kind`, `value`, `stage`), no hydration, no authorization. Only after `withoutScope()` (a `within()` scope applies to the `exactOnSource` branch alone). May throw `SearchTimedOut`.
+Raw rows (`type`, `id`, `mode`, `kind`, `value`, `stage`), no hydration, no authorization. Only after `withoutScope()` (a `within()` scope applies to the `exactOnSource` branch alone). May throw `SearchTimedOut`, or `SearchIndexNotReady` (see [While an index is building](#while-an-index-is-building)).
 
 ### Palette
 
@@ -243,7 +247,9 @@ $palette['orders'];     // SearchResults, keyed by morph alias, in the order giv
 
 ### While an index is building
 
-When a type has never been fully indexed, a search is answered from the source tables by the `database` driver if the definition's `fallback()` is true (the default; no typo tolerance, every search scans, so use it for small tables or short windows). With `fallback(): false`, only the `exactOnSource` fields are searched meanwhile. Either way the search never throws and every result carries `indexBuilding = true`. Set `'driver' => 'database'` to use the source-table driver everywhere (small tables, local development).
+When a type has never been fully indexed, a search is answered from the source tables by the `database` driver if the definition's `fallback()` is true (the default; no typo tolerance, every search scans, so use it for small tables or short windows). With `fallback(): false`, `get()` searches only the `exactOnSource` fields meanwhile, `similar()` returns nothing, and `apply()` and `candidates()` throw `SearchIndexNotReady` (a silently partial list would pass for the answer; the message never carries the phrase). Otherwise the search never throws. Set `'driver' => 'database'` to use the source-table driver everywhere (small tables, local development).
+
+Every result of such a search carries `indexBuilding = true`. So does a search of a **ready type whose rebuild is pending** (a changed definition, `model-search:rebuild`, a drain that switched to a rebuild): the existing index keeps serving, with no gap, but it may not contain what the rebuild has yet to write (for instance a field the new definition adds), and `indexBuilding` says so. The flag is read from a cache that lives a few seconds.
 
 ### Timeouts and rate limits
 
@@ -295,9 +301,18 @@ The package keeps the triggers and indexes in step with your definitions and is 
 Every definition has a fingerprint (its fields, paths, stage constraint and name-word settings) and `ModelSearch::version()`.
 
 - A release applies and rebuilds **only the types whose definition it owns**: a type installed by a newer version, or by another release with a different fingerprint at the same version, is left alone. The older release, running `migrate` during a deploy, logs a warning instead of failing the deploy.
+- **Every change to a definition requires a higher `version()`**: its fields, modes, stages, normalizers or relations, and also `name_words.*`, `partition_column` and `sortAt()`. Without the bump `migrate` fails with `InstallRefused` ("different fingerprint"), the doctor reports `fingerprint-differs`, and the type keeps serving from its old projection.
 - Change a definition's **behaviour** in a way the fingerprint cannot see (a custom normalizer, a `revealUsing` that changes what is indexed) and you must **bump `version()`** to force a rebuild.
 - **Rolling back to an older release requires a version bump too:** a revert would otherwise present an older version than the one installed and be refused. Bump it above the one you are reverting from.
-- Changed fingerprints rebuild the type in the background from its source tables while searches fall back as described in [While an index is building](#while-an-index-is-building).
+- A changed definition rebuilds the type in the background from its source tables. Searches keep using the existing index meanwhile and report `indexBuilding`, as described in [While an index is building](#while-an-index-is-building).
+
+### Several databases
+
+Sync, drain and doctor run on the **default connection**. A host with several databases (a database per tenant, say) runs them once per database, for instance by wrapping the commands in its tenant-aware runner; `SchemaSync` skips the definitions whose tables live on another connection.
+
+## Public API
+
+Everything marked `@internal` (the compiler, the SQL builders, the drivers, the schema and indexing helpers, the normalization helpers) may change in any 0.x release. That includes `DriverManager::extend()` and the `Driver` interface: a custom driver needs internal accessors of `SearchQuery`. Public: the definition classes, the registry and its facade, `SearchQuery`, the results, the exceptions, the events, the contracts, the commands, the jobs, `Normalizer`, `SearchIndexer`, `IndexState` and `DrainStats`. Every exception implements `Happenv\ModelSearch\Exceptions\ModelSearchException`; `UnsupportedQuery` (a query nothing can answer) is a runtime refusal, not a definition error.
 
 ## Privacy
 
@@ -311,7 +326,7 @@ A search phrase is personal data: it is typed by a person and may be a name, an 
 
 ## Doctor
 
-`php artisan model-search:doctor` lists what is wrong and exits with a failure when there is anything to report: lag, drifted triggers or indexes, missing or invalid planned indexes, types that are not installed or not ready, failed records, change-log nodes no definition watches, key rows without an entry or with a stage that differs from their entry's, and privacy violations (including a server where `log_parameter_max_length_on_error` cannot be set to 0). `Happenv\ModelSearch\Postgres\Doctor\Doctor::inspect()` returns the same findings for your own alerting. Its key checks are bounded by `doctor.timeout_ms`.
+`php artisan model-search:doctor` lists what is wrong and exits with a failure when there is anything to report: lag, drifted triggers or indexes, missing or invalid planned indexes, types that are not installed, not ready or installed for another definition, a key field declared for `Infix` alone under the `postgres` driver, failed records, change-log nodes no definition watches, key rows without an entry or with a stage that differs from their entry's, and privacy violations (including a server where `log_parameter_max_length_on_error` cannot be set to 0). `Happenv\ModelSearch\Postgres\Doctor\Doctor::inspect()` returns the same findings for your own alerting. Its key checks are bounded by `doctor.timeout_ms`.
 
 ## Known limits
 

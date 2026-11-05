@@ -8,6 +8,9 @@ use Closure;
 use Happenv\ModelSearch\Compilation\CompiledPath;
 use Happenv\ModelSearch\Normalization\Normalizer;
 
+/**
+ * @internal
+ */
 final readonly class CompiledField
 {
     /**

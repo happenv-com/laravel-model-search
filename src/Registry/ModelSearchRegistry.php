@@ -7,6 +7,7 @@ namespace Happenv\ModelSearch\Registry;
 use Happenv\ModelSearch\Compilation\ColumnTypes;
 use Happenv\ModelSearch\Compilation\KeyType;
 use Happenv\ModelSearch\Compilation\PathCompiler;
+use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\CompiledField;
 use Happenv\ModelSearch\Definition\FieldType;
@@ -22,6 +23,7 @@ use Happenv\ModelSearch\Exceptions\ExtensionWithoutDefinition;
 use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\UnknownDefinition;
 use Happenv\ModelSearch\Exceptions\UnsupportedStages;
+use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -107,6 +109,28 @@ final class ModelSearchRegistry
     }
 
     /**
+     * Whether the model's index has been built completely at least once, so the `postgres` driver
+     * serves it from the index. A cached answer, at most a few seconds old.
+     *
+     * @param  class-string<Model>  $modelClass
+     */
+    public function isReady(string $modelClass): bool
+    {
+        return $this->indexState($modelClass)->isReady($this->for($modelClass)->morphAlias);
+    }
+
+    /**
+     * Whether the model's index is being rebuilt (installed, or its definition changed): searches
+     * keep using the existing index meanwhile, and say `indexBuilding`.
+     *
+     * @param  class-string<Model>  $modelClass
+     */
+    public function isRebuilding(string $modelClass): bool
+    {
+        return $this->indexState($modelClass)->isRebuilding($this->for($modelClass)->morphAlias);
+    }
+
+    /**
      * Compiles every registration, so a dangling extension or a broken definition surfaces here.
      *
      * @return array<class-string<Model>, CompiledDefinition>
@@ -126,6 +150,14 @@ final class ModelSearchRegistry
         }
 
         return $all;
+    }
+
+    /**
+     * @param  class-string<Model>  $modelClass
+     */
+    private function indexState(string $modelClass): IndexState
+    {
+        return new IndexState(Sql::connectionName(new $modelClass));
     }
 
     /**

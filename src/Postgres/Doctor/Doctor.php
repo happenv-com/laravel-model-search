@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Postgres\Doctor;
 
 use Happenv\ModelSearch\Compilation\Sql;
+use Happenv\ModelSearch\Definition\FieldType;
+use Happenv\ModelSearch\Definition\Mode;
+use Happenv\ModelSearch\Exceptions\InstallRefused;
 use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Happenv\ModelSearch\Postgres\Indexing\RootResolver;
 use Happenv\ModelSearch\Postgres\Indexing\SearchIndexer;
@@ -32,6 +35,8 @@ use stdClass;
  *
  * The key checks read the whole key table in one pass; they run with parallel workers off and a
  * statement timeout of their own.
+ *
+ * @internal
  */
 final readonly class Doctor
 {
@@ -59,6 +64,7 @@ final readonly class Doctor
             ...$this->lag(),
             ...$this->schema(),
             ...$this->types(),
+            ...$this->infixKeys(),
             ...$this->failures($db),
             ...$this->unknownNodes($db),
             ...$this->keyScans($db),
@@ -100,6 +106,35 @@ final readonly class Doctor
     }
 
     /**
+     * Key fields declared for `Infix` alone: the database driver searches them, the postgres driver
+     * has no index for it and ignores them, so under that driver nothing would ever match.
+     *
+     * @return list<Finding>
+     */
+    private function infixKeys(): array
+    {
+        if (config('model-search.driver') !== 'postgres') {
+            return [];
+        }
+
+        $findings = [];
+
+        foreach ($this->registry->all() as $definition) {
+            foreach ($definition->fields as $field) {
+                if ($field->type === FieldType::Key && $field->modes === [Mode::Infix]) {
+                    $findings[] = new Finding('infix-ignored', sprintf(
+                        '%s: the key field "%s" is declared for Infix only; the postgres driver does not search by Infix, so nothing will match it. Add Exact, Prefix or Suffix.',
+                        $definition->morphAlias,
+                        $field->kind,
+                    ), $definition->morphAlias);
+                }
+            }
+        }
+
+        return $findings;
+    }
+
+    /**
      * @return list<Finding>
      */
     private function types(): array
@@ -108,7 +143,9 @@ final readonly class Doctor
         $uninstalled = $this->sync->uninstalled();
 
         foreach ($uninstalled as $type => $reason) {
-            $findings[] = new Finding($reason === 'not installed' ? 'type-not-installed' : 'fingerprint-differs', sprintf('%s: %s.', $type, $reason), $type);
+            $findings[] = $reason === 'not installed'
+                ? new Finding('type-not-installed', sprintf('%s: %s.', $type, $reason), $type)
+                : new Finding('fingerprint-differs', sprintf('%s: %s. %s', $type, $reason, InstallRefused::VERSION_RULE), $type);
         }
 
         foreach ($this->registry->all() as $definition) {

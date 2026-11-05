@@ -10,7 +10,7 @@ use RuntimeException;
  * Raised after a sync that could not take a lock on some objects in time. Everything else was
  * installed; running the sync again finishes the rest.
  */
-final class SchemaSyncIncomplete extends RuntimeException
+final class SchemaSyncIncomplete extends RuntimeException implements ModelSearchException
 {
     /** @var list<InstallRefused> Installs that were refused in the same run. */
     public array $refusals = [];

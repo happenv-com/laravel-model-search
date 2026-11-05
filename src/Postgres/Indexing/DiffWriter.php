@@ -16,6 +16,8 @@ use Illuminate\Database\Connection;
  * stage differs), so the partial stage-zero indexes can serve the first stage without ever
  * touching the entry (MS-18). The caller owns the transaction: entry and key rows of one root
  * commit together.
+ *
+ * @internal
  */
 final readonly class DiffWriter
 {

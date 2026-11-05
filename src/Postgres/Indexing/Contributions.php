@@ -27,6 +27,8 @@ use Illuminate\Database\Connection;
  *
  * A root that does not exist, or is soft deleted, has no contribution, so the writer removes it.
  * A normalizer may return an empty string: such a value is dropped, never indexed.
+ *
+ * @internal
  */
 final class Contributions
 {

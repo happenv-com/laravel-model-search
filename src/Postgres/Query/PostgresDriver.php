@@ -11,6 +11,7 @@ use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Drivers\DatabaseDriver;
 use Happenv\ModelSearch\Drivers\Driver;
 use Happenv\ModelSearch\Drivers\IdNarrowing;
+use Happenv\ModelSearch\Exceptions\SearchIndexNotReady;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Happenv\ModelSearch\Postgres\Session\SearchSession;
@@ -34,8 +35,11 @@ use Illuminate\Support\Collection;
  *
  * A type whose index has never been built completely ({@see IndexState::isReady()}) is served by the
  * {@see DatabaseDriver} straight from its source tables when its definition allows a `fallback()`;
- * otherwise only its `exactOnSource` fields are searched meanwhile, and the search never throws. In
- * both cases every result of the call says `indexBuilding`. A palette that mixes ready and
+ * otherwise `get()` searches only its `exactOnSource` fields meanwhile and never throws, while
+ * `apply()` and `candidates()` throw {@see SearchIndexNotReady} (a silently partial list would
+ * pass for the answer). In both cases every result of the call says `indexBuilding`, as it does
+ * while a ready type is being rebuilt ({@see IndexState::isRebuilding()}; the existing index
+ * serves the search, which may miss what the rebuild has yet to write). A palette that mixes ready and
  * unready types reads the ready ones in its one statement and the others one by one, and returns
  * them together, each type ranked on its own.
  *
@@ -43,10 +47,13 @@ use Illuminate\Support\Collection;
  * {@see RoundTwo}, which never starts after a timeout. `apply()` resolves the keys of the matching
  * records on the search connection ({@see ApplyIds}) and hands them to the table query; `similar()`
  * is one `Fuzzy` statement over the names ({@see SimilarQuery}). A type whose index is not ready is
- * answered the same way for all three (the source tables, or only its `exactOnSource` fields).
+ * answered from the source tables, or (without a fallback) by nothing for `similar()` and by the
+ * refusal for `apply()` and `candidates()`.
  * `candidates()` reads the raw rows of round one from the index ({@see CandidateRows}).
  *
  * The viewer's rate limit is charged once per call, before its first statement.
+ *
+ * @internal
  */
 final readonly class PostgresDriver implements Driver
 {
@@ -62,11 +69,12 @@ final readonly class PostgresDriver implements Driver
      * Several types in one search.
      *
      * @param  list<SearchQuery>  $queries  One per model.
+     * @param  ChargeOnce|null  $charge  The charge the whole palette shares, when the caller runs other drivers' queries too.
      * @return array<string, SearchResults> By morph alias, in the order of the queries.
      */
-    public function palette(array $queries): array
+    public function palette(array $queries, ?ChargeOnce $charge = null): array
     {
-        $charge = new ChargeOnce;
+        $charge ??= new ChargeOnce;
         $queries = array_map(static fn (SearchQuery $query): SearchQuery => $query->sharingCharge($charge), $queries);
         $results = [];
         $ready = [];
@@ -78,6 +86,8 @@ final readonly class PostgresDriver implements Driver
             NameFieldSelection::assertWhole($definition, $query->onlyKinds());
 
             if ($this->isReady($definition)) {
+                // A pending rebuild keeps the existing index in use, but the answer may miss what the rebuild is yet to write.
+                $building = $building || $this->isRebuilding($definition);
                 $ready[Sql::connectionName(new ($definition->modelClass))][] = $query;
 
                 continue;
@@ -163,7 +173,11 @@ final readonly class PostgresDriver implements Driver
         NameFieldSelection::assertWhole($this->definition, $query->onlyKinds());
 
         if (! $this->isReady($this->definition)) {
-            return $this->applyWhileBuilding($query, $tableQuery);
+            if (! $this->definition->fallback) {
+                throw $this->notReady('apply');
+            }
+
+            return new DatabaseDriver($this->definition)->apply($query, $tableQuery);
         }
 
         $statement = ApplyIds::sql($this->definition, $query);
@@ -185,45 +199,17 @@ final readonly class PostgresDriver implements Driver
         return $tableQuery;
     }
 
-    /**
-     * `apply()` for a type whose index is not ready: its source tables, or only its `exactOnSource` fields.
-     *
-     * @template TModel of Model
-     *
-     * @param  Builder<TModel>  $tableQuery
-     * @return Builder<TModel>
-     */
-    private function applyWhileBuilding(SearchQuery $query, Builder $tableQuery): Builder
-    {
-        if ($this->definition->fallback) {
-            return new DatabaseDriver($this->definition)->apply($query, $tableQuery);
-        }
-
-        $kinds = $this->sourceKinds($query, $this->definition);
-
-        if ($kinds === null) {
-            $query->matched(0);
-            IdNarrowing::narrow($tableQuery, [], $this->definition->resolvedKeySqlType());
-
-            return $tableQuery;
-        }
-
-        return new DatabaseDriver($this->definition)->apply($query->only($kinds)->using(Mode::Exact), $tableQuery);
-    }
-
     #[\Override]
     public function candidates(SearchQuery $query): Collection
     {
         NameFieldSelection::assertWhole($this->definition, $query->onlyKinds());
 
         if (! $this->isReady($this->definition)) {
-            if ($this->definition->fallback) {
-                return new DatabaseDriver($this->definition)->candidates($query);
+            if (! $this->definition->fallback) {
+                throw $this->notReady('candidates');
             }
 
-            $kinds = $this->sourceKinds($query, $this->definition);
-
-            return $kinds === null ? new Collection : new DatabaseDriver($this->definition)->candidates($query->only($kinds)->using(Mode::Exact));
+            return new DatabaseDriver($this->definition)->candidates($query);
         }
 
         $statement = CandidateRows::sql($this->definition, $query);
@@ -341,7 +327,26 @@ final readonly class PostgresDriver implements Driver
 
     private function isReady(CompiledDefinition $definition): bool
     {
-        return new IndexState(Sql::connectionName(new ($definition->modelClass)))->isReady($definition->morphAlias);
+        return $this->state($definition)->isReady($definition->morphAlias);
+    }
+
+    private function isRebuilding(CompiledDefinition $definition): bool
+    {
+        return $this->state($definition)->isRebuilding($definition->morphAlias);
+    }
+
+    private function state(CompiledDefinition $definition): IndexState
+    {
+        return new IndexState(Sql::connectionName(new ($definition->modelClass)));
+    }
+
+    private function notReady(string $call): SearchIndexNotReady
+    {
+        return new SearchIndexNotReady(sprintf(
+            'The index of %s is not built yet and its definition allows no fallback(), so %s() would return a partial list. Run model-search:drain until it is ready, or allow the fallback.',
+            $this->definition->modelClass,
+            $call,
+        ));
     }
 
     /**

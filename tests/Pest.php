@@ -15,6 +15,7 @@ uses(TestCase::class)->in(
     'Feature/Postgres/CandidateBranchesTest.php',
     'Feature/Postgres/IndexPlanTest.php',
     'Feature/Postgres/IndexerTest.php',
+    'Feature/Postgres/IndexStateCacheTest.php',
     'Feature/Postgres/ApplyTest.php',
     'Feature/Postgres/CandidatesTest.php',
     'Feature/Postgres/PaletteRoundOneTest.php',

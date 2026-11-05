@@ -9,6 +9,8 @@ use Happenv\ModelSearch\Compilation\WatchedTable;
 /**
  * Everything one watched table needs: the ways it is watched (a table can be the root of one
  * definition and a child of another) and the root types that read it, which a TRUNCATE rebuilds.
+ *
+ * @internal
  */
 final readonly class TableTriggers
 {

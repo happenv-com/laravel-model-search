@@ -25,6 +25,8 @@ use Throwable;
  * The reading is cached for a minute as one JSON string in the package cache store.
  * `log_min_error_statement` is not judged here: whether the error of a timed out search is logged
  * with its parameters is settled in each search transaction ({@see SearchSession}).
+ *
+ * @internal
  */
 final class PrivacyGate
 {

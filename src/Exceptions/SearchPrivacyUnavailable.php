@@ -12,7 +12,7 @@ use RuntimeException;
  * The violations name server settings, never the phrase. The interface should say that search is
  * temporarily unavailable; `model-search:doctor` lists what to change.
  */
-final class SearchPrivacyUnavailable extends RuntimeException
+final class SearchPrivacyUnavailable extends RuntimeException implements ModelSearchException
 {
     /**
      * @param  list<string>  $violations

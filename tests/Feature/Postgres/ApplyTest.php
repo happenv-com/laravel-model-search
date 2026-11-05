@@ -6,6 +6,7 @@ use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Definition\SearchField;
 use Happenv\ModelSearch\Drivers\DriverManager;
 use Happenv\ModelSearch\Events\SearchPerformed;
+use Happenv\ModelSearch\Exceptions\SearchIndexNotReady;
 use Happenv\ModelSearch\Exceptions\SearchRateLimited;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Exceptions\SearchTooBroad;
@@ -22,9 +23,11 @@ use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\InvoiceSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\OrderSearch;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Auth\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Schema;
 
 covers(ApplyIds::class);
 
@@ -338,6 +341,28 @@ describe('the session', function (): void {
     });
 });
 
+describe('the models apply hands back', function (): void {
+    it('carry no search_id attribute, and keep a column of the table that has that name', function (): void {
+        Order::create(['signature' => 'ABCD-1']);
+        Schema::table('orders', static fn (Blueprint $table) => $table->text('search_id')->nullable());
+        Order::query()->update(['search_id' => 'mine']);
+        $plain = apApply('ABCD-1');
+
+        expect($plain->first()->getAttributes())->toHaveKey('search_id')
+            ->and($plain->first()->search_id)->toBe('mine');
+
+        Schema::table('orders', static fn (Blueprint $table) => $table->dropColumn('search_id'));
+
+        expect(array_keys(apApply('ABCD-1')->first()->getAttributes()))->not->toContain('search_id');
+    });
+
+    it('keep the columns the table query chose', function (): void {
+        Order::create(['signature' => 'ABCD-1']);
+
+        expect(array_keys(apApply('ABCD-1', Order::query()->select('signature'))->first()->getAttributes()))->toBe(['signature']);
+    });
+});
+
 describe('readiness', function (): void {
     function apUnready(): void
     {
@@ -355,38 +380,31 @@ describe('readiness', function (): void {
             ->and(msIndexStatements($recorder))->toBe([]);
     });
 
-    it('narrows by the source columns only for a type without a fallback', function (): void {
+    it('refuses to apply, and runs nothing, for a type without a fallback whose index is not ready', function (): void {
         ConfigurableOrderSearch::$fallback = false;
         msUse([SearchField::key('signature')->exactOnSource(), SearchField::key('external_number')]);
         Order::create(['signature' => 'ABCD-1', 'external_number' => 'ABCD-1']);
-        Order::create(['signature' => 'ABCD-2']);
-        apUnready();
-        $apply = static fn (string $phrase): array => apSignatures(ConfigurableOrderSearch::query($phrase)->within(Order::query())->apply(Order::query()));
-
-        expect($apply('ABCD-1'))->toBe(['ABCD-1'])
-            ->and($apply('ABCD'))->toBe([]);
-    });
-
-    it('lists the candidates of the source columns only for a type without a fallback', function (): void {
-        ConfigurableOrderSearch::$fallback = false;
-        msUse([SearchField::key('signature')->exactOnSource(), SearchField::key('external_number')]);
-        Order::create(['signature' => 'ABCD-1', 'external_number' => 'ABCD-1']);
-        apUnready();
-        $kinds = static fn (string $phrase): array => ConfigurableOrderSearch::query($phrase)->withoutScope('test')->candidates()->pluck('kind')->all();
-
-        expect($kinds('ABCD-1'))->toBe(['signature'])
-            ->and($kinds('ABCD'))->toBe([]);
-    });
-
-    it('narrows to nothing and runs nothing for a type without a fallback and without a source column', function (): void {
-        ConfigurableOrderSearch::$fallback = false;
-        msUse([SearchField::key('signature')]);
-        Order::create(['signature' => 'ABCD-1']);
         apUnready();
         $recorder = msRecorder();
+        $apply = static fn (string $phrase): Builder => ConfigurableOrderSearch::query($phrase)->within(Order::query())->apply(Order::query());
 
-        expect(apSignatures(ConfigurableOrderSearch::query('ABCD-1')->within(Order::query())->apply(Order::query())))->toBe([])
+        expect(fn () => $apply('ABCD-1'))->toThrow(SearchIndexNotReady::class)
             ->and($recorder->log())->toBe([]);
+
+        try {
+            $apply('ABCD-1');
+        } catch (SearchIndexNotReady $refusal) {
+            expect($refusal->getMessage())->not->toContain('ABCD-1');
+        }
+    });
+
+    it('refuses to list the candidates of a type without a fallback whose index is not ready', function (): void {
+        ConfigurableOrderSearch::$fallback = false;
+        msUse([SearchField::key('signature')->exactOnSource(), SearchField::key('external_number')]);
+        Order::create(['signature' => 'ABCD-1', 'external_number' => 'ABCD-1']);
+        apUnready();
+
+        expect(fn () => ConfigurableOrderSearch::query('ABCD-1')->withoutScope('test')->candidates())->toThrow(SearchIndexNotReady::class);
     });
 });
 

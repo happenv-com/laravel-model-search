@@ -20,6 +20,8 @@ use Illuminate\Support\Collection;
  * joined hosts use to keep the model's own columns): wrapped in a join, a limit, an
  * ordering, a grouping, a union or a custom select would mean something else. The host builder is
  * never mutated; every use is a clone.
+ *
+ * @internal
  */
 final readonly class HostQuery
 {

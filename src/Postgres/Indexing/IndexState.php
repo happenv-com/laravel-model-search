@@ -36,7 +36,8 @@ use Throwable;
  * own: they only set a flag or enqueue a row. (Two live releases with mixed readers for longer than
  * `drain.foreign_grace_seconds` flag full rebuilds of each other's types: no data loss, wasted work.) Applying changes and rebuilding stay owner-only.
  *
- * `ready_at` is cached for a few seconds as a plain boolean; the cache is only a way to spare the
+ * `ready_at` and the pending-rebuild flag are cached for a few seconds as one short string, per
+ * connection and database; the cache is only a way to spare the
  * database on the hot path, never a source of truth.
  */
 final readonly class IndexState
@@ -50,6 +51,25 @@ final readonly class IndexState
      */
     public function isReady(string $subjectType): bool
     {
+        return $this->flags($subjectType)[0];
+    }
+
+    /**
+     * Whether a rebuild of the type is pending (the type was installed or its definition changed).
+     * Searches use the existing index meanwhile, which may miss what the rebuild is yet to write.
+     */
+    public function isRebuilding(string $subjectType): bool
+    {
+        return $this->flags($subjectType)[1];
+    }
+
+    /**
+     * Readiness and rebuild flag as one cached string.
+     *
+     * @return array{bool, bool}
+     */
+    private function flags(string $subjectType): array
+    {
         $key = $this->cacheKey($subjectType);
 
         try {
@@ -58,20 +78,21 @@ final readonly class IndexState
             $cached = null;
         }
 
-        if (is_bool($cached)) {
-            return $cached;
+        if (is_string($cached) && preg_match('/^[01]:[01]$/', $cached) === 1) {
+            return [$cached[0] === '1', $cached[2] === '1'];
         }
 
-        $ready = $this->find($subjectType)['ready_at'] ?? null;
-        $ready = $ready !== null;
+        $row = $this->find($subjectType);
+        $ready = ($row['ready_at'] ?? null) !== null;
+        $rebuilding = ($row['rebuild_cursor'] ?? null) !== null;
 
         try {
-            $this->cache()->put($key, $ready, self::READY_TTL_SECONDS);
+            $this->cache()->put($key, ($ready ? '1' : '0').':'.($rebuilding ? '1' : '0'), self::READY_TTL_SECONDS);
         } catch (Throwable) {
             // The cache only saves a query.
         }
 
-        return $ready;
+        return [$ready, $rebuilding];
     }
 
     /**
@@ -223,7 +244,9 @@ final readonly class IndexState
 
     private function cacheKey(string $subjectType): string
     {
-        return 'model-search:ready:'.TableNames::forConnection($this->connection)->prefix().':'.$subjectType;
+        $connection = $this->db();
+
+        return sprintf('model-search:state:%s:%s:%s:%s', $connection->getName(), $connection->getDatabaseName(), TableNames::forConnection($this->connection)->prefix(), $subjectType);
     }
 
     private function cache(): Repository

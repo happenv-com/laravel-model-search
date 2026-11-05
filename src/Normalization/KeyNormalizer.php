@@ -9,6 +9,8 @@ namespace Happenv\ModelSearch\Normalization;
  *
  * NFKC, combining marks removed, transliterated to ASCII, lower-cased, and every separator
  * (whitespace, `-`, `_`, `.`, `/`, `#`, `+`, `,`, `:`, `;`) dropped.
+ *
+ * @internal
  */
 final class KeyNormalizer extends FoldsText
 {

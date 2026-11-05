@@ -25,6 +25,8 @@ use Throwable;
  * nodes not yet expanded are handed back unresolved (the caller leaves their log rows where they are).
  * Every expansion runs in its own savepoint; a node that cannot be expanded (an id that does not
  * cast to the key type) is counted and dropped without costing the others.
+ *
+ * @internal
  */
 final class RootResolver
 {

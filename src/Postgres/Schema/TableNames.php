@@ -14,6 +14,8 @@ use InvalidArgumentException;
  *
  * Raw SQL needs the connection prefix spelled out; the schema builder adds it itself, so a
  * migration builds this with an empty connection prefix.
+ *
+ * @internal
  */
 final readonly class TableNames
 {

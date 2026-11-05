@@ -13,6 +13,8 @@ namespace Happenv\ModelSearch\Compilation;
  *
  * A polymorphic child table also carries the discriminator (`morphColumn = morphValue`): only rows
  * that match it belong to the path, so a trigger must test the OLD and the NEW row against it.
+ *
+ * @internal
  */
 final readonly class WatchedTable
 {

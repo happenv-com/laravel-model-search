@@ -20,6 +20,8 @@ use Happenv\ModelSearch\Definition\CompiledDefinition;
  * The name-word stage-zero index is planned only when some definition has both names and stages
  * (decision R11): a definition without names never queries name words, so the index would be dead
  * weight on a table that is already the largest one.
+ *
+ * @internal
  */
 final class IndexPlan
 {

@@ -9,6 +9,8 @@ namespace Happenv\ModelSearch\Normalization;
  *
  * The first is the neutral normalization (the form stored in the index); a locale-specific
  * transliteration (`Müller` → `mueller` for `de`) is added when it differs.
+ *
+ * @internal
  */
 final class QueryVariants
 {

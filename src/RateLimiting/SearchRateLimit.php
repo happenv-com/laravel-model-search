@@ -16,6 +16,8 @@ use Illuminate\Support\Facades\Cache;
  *
  * A search without a viewer (a job, a console command) is not limited: there is nobody to charge it
  * to. Guard anonymous endpoints with the host's own throttle middleware.
+ *
+ * @internal
  */
 final class SearchRateLimit
 {

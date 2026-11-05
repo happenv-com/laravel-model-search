@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Drivers;
 
 use Happenv\ModelSearch\Definition\Mode;
+use Happenv\ModelSearch\Exceptions\SearchIndexNotReady;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Exceptions\SearchTooBroad;
 use Happenv\ModelSearch\Query\SearchQuery;
@@ -20,6 +21,8 @@ use Illuminate\Support\Collection;
  * (the viewer's rate limit) exactly once per call, before the first statement it will actually run
  * (never when it runs none), and reports the number of records `apply()` matched with
  * `$query->matched()`, once per `apply()` call.
+ *
+ * @internal
  */
 interface Driver
 {
@@ -43,6 +46,7 @@ interface Driver
      *
      * @throws SearchTimedOut
      * @throws SearchTooBroad
+     * @throws SearchIndexNotReady
      */
     public function apply(SearchQuery $query, Builder $tableQuery): Builder;
 
@@ -53,6 +57,7 @@ interface Driver
      * @return Collection<int, array{type: string, id: string, mode: Mode, kind: string, value: string|null, stage: string|null}>
      *
      * @throws SearchTimedOut
+     * @throws SearchIndexNotReady
      */
     public function candidates(SearchQuery $query): Collection;
 }

@@ -9,4 +9,4 @@ use RuntimeException;
 /**
  * Raised when a PostgreSQL extension the package needs is not installed in the database.
  */
-final class MissingExtension extends RuntimeException {}
+final class MissingExtension extends RuntimeException implements ModelSearchException {}

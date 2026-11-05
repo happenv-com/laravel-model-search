@@ -12,10 +12,13 @@ use Happenv\ModelSearch\Drivers\Driver;
 use Happenv\ModelSearch\Drivers\DriverManager;
 use Happenv\ModelSearch\Events\SearchPerformed;
 use Happenv\ModelSearch\Exceptions\PartitionMissing;
+use Happenv\ModelSearch\Exceptions\SearchIndexNotReady;
 use Happenv\ModelSearch\Exceptions\SearchRateLimited;
 use Happenv\ModelSearch\Exceptions\SearchScopeMissing;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
+use Happenv\ModelSearch\Exceptions\SearchTooBroad;
 use Happenv\ModelSearch\Exceptions\UnsupportedHostQuery;
+use Happenv\ModelSearch\Exceptions\UnsupportedQuery;
 use Happenv\ModelSearch\RateLimiting\SearchRateLimit;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Illuminate\Contracts\Auth\Authenticatable;
@@ -231,6 +234,10 @@ final class SearchQuery
      *
      * @param  Builder<TModel>  $tableQuery
      * @return Builder<TModel>
+     *
+     * @throws SearchTimedOut
+     * @throws SearchTooBroad
+     * @throws SearchIndexNotReady When the index is not built yet and the definition allows no fallback().
      */
     public function apply(Builder $tableQuery): Builder
     {
@@ -255,6 +262,7 @@ final class SearchQuery
      * @return Collection<int, array{type: string, id: string, mode: Mode, kind: string, value: string|null, stage: string|null}>
      *
      * @throws SearchTimedOut
+     * @throws SearchIndexNotReady When the index is not built yet and the definition allows no fallback().
      */
     public function candidates(): Collection
     {
@@ -604,6 +612,33 @@ final class SearchQuery
     private function announce(int|float $started, int $count, bool $timedOut): void
     {
         Event::dispatch(new SearchPerformed($this->definition()->morphAlias, (int) round((hrtime(true) - $started) / 1_000_000), $count, $timedOut));
+    }
+
+    /**
+     * What `var_dump()` and debuggers show: the phrase is hidden.
+     *
+     * @return array<string, mixed>
+     */
+    public function __debugInfo(): array
+    {
+        return [
+            'modelClass' => $this->modelClass,
+            'phrase' => '[hidden]',
+            'kinds' => $this->kinds,
+            'limit' => $this->limit,
+        ];
+    }
+
+    /**
+     * A query holds the phrase, the host's builders and the viewer; none of it belongs in a queue payload or a cache.
+     *
+     * @return never
+     *
+     * @throws UnsupportedQuery
+     */
+    public function __serialize(): array
+    {
+        throw new UnsupportedQuery('A search query cannot be serialized; build it where it runs.');
     }
 
     private function driver(): Driver

@@ -21,6 +21,8 @@ use Happenv\ModelSearch\Normalization\Normalizer;
  * left out on purpose: they must not trigger a rebuild. PHP logic cannot be hashed, so a custom
  * normalizer (or anything else the SQL cannot see) is covered by its version() and by the
  * definition's own version().
+ *
+ * @internal
  */
 final class Fingerprint
 {

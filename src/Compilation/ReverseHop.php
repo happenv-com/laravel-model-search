@@ -9,6 +9,8 @@ use InvalidArgumentException;
 /**
  * Finds the roots of changed nodes: joins from the root down to the node and filters on the node's key.
  * Soft deleted rows are kept on purpose, a row that was just deleted must still lead to its roots.
+ *
+ * @internal
  */
 final readonly class ReverseHop
 {

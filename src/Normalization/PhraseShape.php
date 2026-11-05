@@ -6,6 +6,8 @@ namespace Happenv\ModelSearch\Normalization;
 
 /**
  * Classifies a search phrase before any query runs.
+ *
+ * @internal
  */
 final class PhraseShape
 {

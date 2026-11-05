@@ -79,6 +79,14 @@ final class IdNarrowing
     {
         $list = $tableQuery->getQuery()->newQuery()->fromRaw(self::unnest($keyType), [Sql::arrayLiteral($ids)])->select('search_ids.search_id');
         $alias = 'search_ids_'.count($tableQuery->getQuery()->joins ?? []);
+
+        if ($tableQuery->getQuery()->columns === null) {
+            // Without explicit columns the join would add its own to every model.
+            $from = $tableQuery->getQuery()->from;
+            $from = is_string($from) ? (preg_split('/\s+as\s+/i', $from)[1] ?? $from) : $tableQuery->getModel()->getTable();
+            $tableQuery->select($from.'.*');
+        }
+
         $tableQuery->joinSub($list, $alias, $tableQuery->getModel()->getQualifiedKeyName(), '=', $alias.'.search_id');
     }
 

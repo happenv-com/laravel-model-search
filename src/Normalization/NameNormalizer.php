@@ -8,6 +8,8 @@ namespace Happenv\ModelSearch\Normalization;
  * Normalizes human names and phrases: the same folding as {@see KeyNormalizer}, but hyphens
  * survive as word boundaries. Apostrophes are removed, other punctuation (`_ . / # + , : ;`) is
  * a word boundary, and runs of whitespace collapse to a single space.
+ *
+ * @internal
  */
 final class NameNormalizer extends FoldsText
 {

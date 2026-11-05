@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 use Happenv\ModelSearch\Definition\CompiledDefinition;
-use Happenv\ModelSearch\Facades\ModelSearch;
+use Happenv\ModelSearch\Facades\ModelSearches;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Product;
 use Illuminate\Support\Facades\DB;
@@ -12,8 +12,8 @@ covers(CompiledDefinition::class);
 
 describe('watched tables', function (): void {
     it('lists root watched columns with stage columns, soft deletes and BelongsTo foreign keys', function (): void {
-        $orders = collect(ModelSearch::for(Order::class)->watchedTables())->firstWhere('table', 'orders');
-        $products = collect(ModelSearch::for(Product::class)->watchedTables())->firstWhere('table', 'products');
+        $orders = collect(ModelSearches::for(Order::class)->watchedTables())->firstWhere('table', 'orders');
+        $products = collect(ModelSearches::for(Product::class)->watchedTables())->firstWhere('table', 'products');
 
         expect($orders->shape)->toBe('self')
             ->and($orders->parentNodeType)->toBe('order')
@@ -23,7 +23,7 @@ describe('watched tables', function (): void {
     });
 
     it('merges the tables of every path of the definition', function (): void {
-        $tables = ModelSearch::for(Order::class)->watchedTables();
+        $tables = ModelSearches::for(Order::class)->watchedTables();
         $addresses = array_values(array_filter($tables, static fn ($table): bool => $table->table === 'addresses'));
 
         expect($addresses)->toHaveCount(1)
@@ -36,7 +36,7 @@ describe('stage sql', function (): void {
         $open = Order::create(['signature' => 'A', 'state' => 'unshipped']);
         $shipped = Order::create(['signature' => 'B', 'state' => 'shipped']);
 
-        $query = ModelSearch::for(Order::class)->stageSql([$open->id, $shipped->id]);
+        $query = ModelSearches::for(Order::class)->stageSql([$open->id, $shipped->id]);
         $stages = collect(DB::select($query['sql'], $query['bindings']))->pluck('stage', 'root_id')->all();
 
         expect($stages)->toBe([$open->id => 0, $shipped->id => 32767])
@@ -46,7 +46,7 @@ describe('stage sql', function (): void {
     it('puts every root in the all stage when the definition has no stages', function (): void {
         $product = Product::create(['sku' => 'X']);
 
-        $query = ModelSearch::for(Product::class)->stageSql([$product->id]);
+        $query = ModelSearches::for(Product::class)->stageSql([$product->id]);
 
         expect(collect(DB::select($query['sql'], $query['bindings']))->pluck('stage', 'root_id')->all())->toBe([(string) $product->id => 32767]);
     });
@@ -54,8 +54,8 @@ describe('stage sql', function (): void {
 
 describe('stage sql bindings', function (): void {
     it('does not bind more than one id parameter however many roots are staged', function (): void {
-        $few = ModelSearch::for(Order::class)->stageSql(['a']);
-        $many = ModelSearch::for(Order::class)->stageSql(array_map(strval(...), range(1, 1500)));
+        $few = ModelSearches::for(Order::class)->stageSql(['a']);
+        $many = ModelSearches::for(Order::class)->stageSql(array_map(strval(...), range(1, 1500)));
 
         expect(count($many['bindings']))->toBe(count($few['bindings']))
             ->and(substr_count($many['sql'], '?'))->toBe(count($many['bindings']))

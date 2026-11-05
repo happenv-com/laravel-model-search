@@ -10,6 +10,8 @@ use Normalizer as IntlNormalizer;
 /**
  * Shared folding for the built-in normalizers: NFKC, combining marks removed, transliterated to
  * ASCII, lower-cased. Not public API.
+ *
+ * @internal
  */
 abstract class FoldsText implements Normalizer
 {

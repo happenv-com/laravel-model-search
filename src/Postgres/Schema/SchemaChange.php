@@ -6,6 +6,8 @@ namespace Happenv\ModelSearch\Postgres\Schema;
 
 /**
  * One unit of work the sync would do: bring one table's triggers, or one index, to the planned state.
+ *
+ * @internal
  */
 final readonly class SchemaChange
 {

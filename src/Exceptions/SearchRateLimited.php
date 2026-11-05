@@ -9,7 +9,7 @@ use RuntimeException;
 /**
  * Raised before any query when a viewer searches more often than `model-search.rate_limit` allows.
  */
-final class SearchRateLimited extends RuntimeException
+final class SearchRateLimited extends RuntimeException implements ModelSearchException
 {
     public function __construct(public readonly int $retryAfterSeconds)
     {

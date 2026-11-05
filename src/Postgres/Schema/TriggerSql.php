@@ -37,6 +37,8 @@ use InvalidArgumentException;
  * - child: the row holds a foreign key to its parent; the parent is logged (the old and the new
  *   one when the key moves). A polymorphic child is guarded on its discriminator for OLD and NEW.
  * - self: the row itself is the node, logged under its own node type.
+ *
+ * @internal
  */
 final readonly class TriggerSql
 {

@@ -51,6 +51,8 @@ use Throwable;
  * released savepoint. The session is the host's own (ruling R16, see {@see SearchConnectionFactory}):
  * it sees the host's uncommitted rows and, under read/write splitting, the search runs on the
  * primary. On another database there is no session to configure and the work just runs.
+ *
+ * @internal
  */
 final class SearchSession
 {

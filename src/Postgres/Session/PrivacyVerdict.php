@@ -11,6 +11,8 @@ use JsonException;
  * phrase to a log, and the longest statement timeout that still stays below every log threshold.
  *
  * Only scalars: a verdict is cached as one JSON string.
+ *
+ * @internal
  */
 final readonly class PrivacyVerdict
 {

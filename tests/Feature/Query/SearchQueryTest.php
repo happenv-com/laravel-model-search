@@ -274,7 +274,8 @@ describe('matching', function (): void {
         expect($find('ab'))->toBe(['S-2'])
             ->and($find('ab1'))->toBe(['S-1'])
             ->and($find('678'))->toBe([])
-            ->and($find('5678'))->toBe([])
+            ->and($find('5678'))->toBe(['S-1'])
+            ->and($find('3456'))->toBe([])
             ->and($find('345678'))->toBe(['S-1'])
             ->and($find('ko'))->toBe([])
             ->and($find('kow'))->toBe(['S-1']);
@@ -990,5 +991,22 @@ describe('viewer', function (): void {
         $this->actingAs(viewerWithId(7));
         expect($value($base()))->toBe('a@example.com')
             ->and($value($base()->forUser(viewerWithId(2))))->toBeNull();
+    });
+});
+
+describe('the phrase stays private', function (): void {
+    it('is hidden from debug output', function (): void {
+        $query = OrderSearch::query('secret-phrase-123')->withoutScope('test');
+
+        expect(print_r($query, true))->not->toContain('secret-phrase-123');
+
+        ob_start();
+        var_dump($query);
+
+        expect(ob_get_clean())->not->toContain('secret-phrase-123');
+    });
+
+    it('cannot be serialized', function (): void {
+        expect(fn () => serialize(OrderSearch::query('secret-phrase-123')->withoutScope('test')))->toThrow(UnsupportedQuery::class);
     });
 });

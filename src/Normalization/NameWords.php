@@ -9,6 +9,8 @@ namespace Happenv\ModelSearch\Normalization;
  *
  * Applies the minimum length, uniqueness and order of appearance. The per-record cap
  * (`name_words.max_per_record`) is applied later, across all of a record's names.
+ *
+ * @internal
  */
 final class NameWords
 {
