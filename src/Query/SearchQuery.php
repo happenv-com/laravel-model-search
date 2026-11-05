@@ -5,20 +5,25 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Query;
 
 use Closure;
+use Happenv\ModelSearch\Contracts\SearchTermObserver;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Drivers\Driver;
 use Happenv\ModelSearch\Drivers\DriverManager;
+use Happenv\ModelSearch\Events\SearchPerformed;
 use Happenv\ModelSearch\Exceptions\PartitionMissing;
+use Happenv\ModelSearch\Exceptions\SearchRateLimited;
 use Happenv\ModelSearch\Exceptions\SearchScopeMissing;
 use Happenv\ModelSearch\Exceptions\SearchTimedOut;
 use Happenv\ModelSearch\Exceptions\UnsupportedHostQuery;
+use Happenv\ModelSearch\RateLimiting\SearchRateLimit;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Event;
 use InvalidArgumentException;
 
 /**
@@ -198,8 +203,9 @@ final class SearchQuery
     public function get(): SearchResults
     {
         $this->guard();
+        $this->admit();
 
-        return $this->driver()->get($this);
+        return $this->performed(fn (): SearchResults => $this->driver()->get($this), static fn (SearchResults $results): int => count($results), static fn (SearchResults $results): bool => $results->timedOut);
     }
 
     /**
@@ -208,8 +214,9 @@ final class SearchQuery
     public function similar(): SearchResults
     {
         $this->guard();
+        $this->admit();
 
-        return $this->driver()->similar($this);
+        return $this->performed(fn (): SearchResults => $this->driver()->similar($this), static fn (SearchResults $results): int => count($results), static fn (SearchResults $results): bool => $results->timedOut);
     }
 
     /**
@@ -229,6 +236,8 @@ final class SearchQuery
             throw new InvalidArgumentException(sprintf('The table query is for %s, but this search is for %s.', $tableQuery->getModel()::class, $this->modelClass));
         }
 
+        $this->admit();
+
         return $this->driver()->apply($this, $tableQuery);
     }
 
@@ -247,8 +256,9 @@ final class SearchQuery
         }
 
         $this->guard();
+        $this->admit();
 
-        return $this->driver()->candidates($this);
+        return $this->performed(fn (): Collection => $this->driver()->candidates($this), static fn (Collection $candidates): int => $candidates->count(), static fn (): bool => false);
     }
 
     /**
@@ -394,6 +404,50 @@ final class SearchQuery
         }
 
         $this->partitionFilter();
+    }
+
+    /**
+     * Charges the viewer's rate limit, which stops a search before any query, and hands the phrase to
+     * the host's observer.
+     *
+     * @throws SearchRateLimited
+     */
+    private function admit(): void
+    {
+        resolve(SearchRateLimit::class)->attempt($this->viewer());
+        resolve(SearchTermObserver::class)->observe($this->phrase);
+    }
+
+    /**
+     * Runs a search and reports it with {@see SearchPerformed}: no phrase, no value, no record.
+     *
+     * @template TOutcome
+     *
+     * @param  Closure(): TOutcome  $search
+     * @param  Closure(TOutcome): int  $count
+     * @param  Closure(TOutcome): bool  $timedOut
+     * @return TOutcome
+     */
+    private function performed(Closure $search, Closure $count, Closure $timedOut): mixed
+    {
+        $started = hrtime(true);
+
+        try {
+            $outcome = $search();
+        } catch (SearchTimedOut $exception) {
+            $this->announce($started, 0, true);
+
+            throw $exception;
+        }
+
+        $this->announce($started, $count($outcome), $timedOut($outcome));
+
+        return $outcome;
+    }
+
+    private function announce(int|float $started, int $count, bool $timedOut): void
+    {
+        Event::dispatch(new SearchPerformed($this->definition()->morphAlias, (int) round((hrtime(true) - $started) / 1_000_000), $count, $timedOut));
     }
 
     private function driver(): Driver

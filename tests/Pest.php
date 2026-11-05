@@ -12,5 +12,7 @@ uses(TestCase::class)->in(
     'Feature/[!P]*',
     'Feature/Postgres/IndexPlanTest.php',
     'Feature/Postgres/IndexerTest.php',
+    'Feature/Postgres/PrivacyGateTest.php',
+    'Feature/Postgres/SearchSessionNestedTest.php',
     'Feature/Postgres/TriggersTest.php',
 );

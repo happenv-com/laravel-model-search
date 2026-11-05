@@ -21,6 +21,7 @@ use Happenv\ModelSearch\Normalization\LikeEscaper;
 use Happenv\ModelSearch\Normalization\Normalizer;
 use Happenv\ModelSearch\Normalization\PhraseShape;
 use Happenv\ModelSearch\Normalization\QueryVariants;
+use Happenv\ModelSearch\Postgres\Session\SearchSession;
 use Happenv\ModelSearch\Query\HostQuery;
 use Happenv\ModelSearch\Query\RevealPolicy;
 use Happenv\ModelSearch\Query\SearchMatch;
@@ -32,7 +33,6 @@ use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 
@@ -53,9 +53,10 @@ use Illuminate\Support\Str;
  *   nothing, and a parent model without a definition is an error;
  * - cost depends on the indexes of the application, every search scans.
  *
- * Statements are single SQL statements whose search phrase is a bound parameter; on PostgreSQL
- * they run in a transaction with a literal `statement_timeout`, which is restored when the search
- * runs inside the caller's transaction.
+ * Statements are single SQL statements whose search phrase is a bound parameter. They run on the
+ * search connection of {@see SearchSession}, not on the host's: on PostgreSQL in a transaction with
+ * the session's timeout, with the phrase sent as a parameter and no listener or query log of the
+ * host seeing the statement.
  */
 final readonly class DatabaseDriver implements Driver
 {
@@ -72,8 +73,6 @@ SQL;
     /** The most parents in scope a `via` field follows per search. */
     public const int VIA_PARENT_LIMIT = 50;
 
-    private const string POSTGRES_TIMEOUT_STATE = '57014';
-
     public function __construct(private CompiledDefinition $definition) {}
 
     #[\Override]
@@ -89,13 +88,13 @@ SQL;
         $host = $query->scope();
 
         try {
-            [$rows, $restricted] = $this->run($this->timeout('search'), function () use ($query, $hits, $host, $stage): array {
+            [$rows, $restricted] = $this->run($this->timeout('search'), function (Connection $db) use ($query, $hits, $host, $stage): array {
                 $restricted = $stage instanceof SearchStage;
-                $rows = $this->select($this->rowsSql($query, $hits, $host, $stage, $restricted));
+                $rows = $this->select($db, $this->rowsSql($query, $hits, $host, $stage, $restricted));
 
                 if ($restricted && ($rows === [] || ! $rows[0]->hasNonExact)) {
                     $restricted = false;
-                    $rows = $this->select($this->rowsSql($query, $hits, $host, $stage, false));
+                    $rows = $this->select($db, $this->rowsSql($query, $hits, $host, $stage, false));
                 }
 
                 return [$rows, $restricted];
@@ -122,7 +121,7 @@ SQL;
         $host = $query->scope();
 
         try {
-            $rows = $this->run($this->timeout('similar'), fn (): array => $this->select($this->rowsSql($query, $hits, $host, $stage, false)));
+            $rows = $this->run($this->timeout('similar'), fn (Connection $db): array => $this->select($db, $this->rowsSql($query, $hits, $host, $stage, false)));
         } catch (SearchTimedOut) {
             return new SearchResults(timedOut: true);
         }
@@ -138,7 +137,7 @@ SQL;
         $ids = [];
 
         if ($hits instanceof Fragment) {
-            $rows = $this->run($this->timeout('search'), fn (): array => $this->select($this->idsSql($query, $hits)));
+            $rows = $this->run($this->timeout('search'), fn (Connection $db): array => $this->select($db, $this->idsSql($query, $hits)));
             $ids = array_values(array_unique(array_map(static fn (Hit $hit): string => $hit->rootId, $rows)));
             IdNarrowing::assertWithinCap($ids);
         }
@@ -157,7 +156,7 @@ SQL;
             return new Collection;
         }
 
-        $rows = $this->run($this->timeout('search'), fn (): array => $this->select($this->candidatesSql($query, $hits)));
+        $rows = $this->run($this->timeout('search'), fn (Connection $db): array => $this->select($db, $this->candidatesSql($query, $hits)));
         $stage = $this->definition->constrainedStage();
 
         return new Collection(array_map(fn (Hit $hit): array => [
@@ -655,17 +654,12 @@ SQL;
         return $this->definition->keySqlType ?? new ColumnTypes()->of($model, $model->getTable(), $model->getKeyName());
     }
 
-    private function connection(): Connection
-    {
-        return (new ($this->definition->modelClass))->getConnection();
-    }
-
     /**
      * @return list<Hit>
      */
-    private function select(Fragment $fragment): array
+    private function select(Connection $db, Fragment $fragment): array
     {
-        return array_values(array_map(Hit::fromRow(...), $this->connection()->select($fragment->sql, $fragment->bindings)));
+        return array_values(array_map(Hit::fromRow(...), $db->select($fragment->sql, $fragment->bindings)));
     }
 
     /**
@@ -679,53 +673,18 @@ SQL;
     }
 
     /**
-     * Runs the work in one place that owns the statement timeout and the handling of failures.
-     *
-     * A statement that runs out of time raises {@see SearchTimedOut}. Any other database failure is
-     * rethrown as {@see SearchFailed} without the original, whose message carries the SQL and with
-     * it the phrase.
+     * Runs the work on the search connection, where the phrase is a parameter and nothing it
+     * touches is reported to the host ({@see SearchSession}). A statement that runs out of time
+     * raises {@see SearchTimedOut}; any other database failure is rethrown as {@see SearchFailed}
+     * without the original, whose message carries the SQL and with it the phrase.
      *
      * @template TResult
      *
-     * @param  Closure(): TResult  $work
+     * @param  Closure(Connection): TResult  $work
      * @return TResult
      */
     private function run(int $timeoutMs, Closure $work): mixed
     {
-        $connection = $this->connection();
-
-        try {
-            if ($connection->getDriverName() !== 'pgsql') {
-                return $work();
-            }
-
-            $nested = $connection->transactionLevel() > 0;
-            $previous = $nested ? $this->currentTimeout($connection) : null;
-
-            try {
-                return $connection->transaction(static function () use ($connection, $timeoutMs, $work): mixed {
-                    $connection->statement('SET LOCAL statement_timeout = '.$timeoutMs);
-
-                    return $work();
-                });
-            } finally {
-                if ($previous !== null) {
-                    $connection->select("select set_config('statement_timeout', ?, true)", [$previous]);
-                }
-            }
-        } catch (QueryException $exception) {
-            $state = (string) $exception->getCode();
-
-            throw $state === self::POSTGRES_TIMEOUT_STATE
-                ? new SearchTimedOut('The search ran out of time.')
-                : new SearchFailed(sprintf('The search statement failed (SQLSTATE %s).', $state));
-        }
-    }
-
-    private function currentTimeout(Connection $connection): string
-    {
-        $row = $connection->selectOne("select current_setting('statement_timeout') as value");
-
-        return is_object($row) && isset($row->value) && is_string($row->value) ? $row->value : '0';
+        return resolve(SearchSession::class)->run(Sql::connectionName(new ($this->definition->modelClass)), $timeoutMs, $work);
     }
 }
