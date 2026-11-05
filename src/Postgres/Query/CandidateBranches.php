@@ -6,6 +6,7 @@ namespace Happenv\ModelSearch\Postgres\Query;
 
 use Closure;
 use Happenv\ModelSearch\Compilation\CompiledPath;
+use Happenv\ModelSearch\Compilation\RelationNames;
 use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\CompiledField;
@@ -442,7 +443,7 @@ final class CandidateBranches
      */
     private function viaBranch(CompiledField $field): ?Fragment
     {
-        $relation = method_exists($this->model, $field->path) ? $this->model->{$field->path}() : null;
+        $relation = RelationNames::find($this->model, $field->path);
 
         if (! $relation instanceof BelongsTo) {
             return null;

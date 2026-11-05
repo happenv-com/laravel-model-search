@@ -7,7 +7,10 @@ namespace Happenv\ModelSearch\Tests\Fixtures;
 use Happenv\ModelSearch\Facades\ModelSearches;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Address;
 use Happenv\ModelSearch\Tests\Fixtures\Models\CarrierUnit;
+use Happenv\ModelSearch\Tests\Fixtures\Models\CodedItem;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Customer;
+use Happenv\ModelSearch\Tests\Fixtures\Models\DynamicInvoice;
+use Happenv\ModelSearch\Tests\Fixtures\Models\DynamicOrder;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Invoice;
 use Happenv\ModelSearch\Tests\Fixtures\Models\MarketOrder;
 use Happenv\ModelSearch\Tests\Fixtures\Models\Order;
@@ -38,6 +41,9 @@ final class FixtureSearchServiceProvider extends ServiceProvider
             'product' => Product::class,
             'invoice' => Invoice::class,
             'customer' => Customer::class,
+            'coded_item' => CodedItem::class,
+            'dynamic_order' => DynamicOrder::class,
+            'dynamic_invoice' => DynamicInvoice::class,
         ]);
 
         ModelSearches::register(OrderSearch::class);

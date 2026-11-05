@@ -255,7 +255,7 @@ final class ModelSearchRegistry
                 return $field;
             }
 
-            return $field->withCompiledPath($compiler->compile($modelClass, $field->path, $field->translatable, $withScopes));
+            return $field->withCompiledPath($compiler->compile($modelClass, $field->path, $field->translatable, $withScopes, $field->each));
         }, $fields);
     }
 

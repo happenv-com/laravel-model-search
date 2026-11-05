@@ -90,6 +90,7 @@ final class Fingerprint
             'modes' => $modes,
             'via' => $via,
             'translatable' => $field->translatable,
+            'each' => $field->each,
             'normalizer' => self::normalizer($field),
             'contribution' => self::contribution($field),
         ];

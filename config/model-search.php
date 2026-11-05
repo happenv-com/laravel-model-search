@@ -13,6 +13,7 @@ return [
     'search' => ['timeout_ms' => 300],
     'similar' => ['timeout_ms' => 1000],
     'name_words' => ['min_length' => 2, 'max_per_record' => 12],
+    'each' => ['max_per_record' => 50],
     'identifier_rule' => ['digit_share' => 0.5],
     'drain' => [
         'rows' => 5000,

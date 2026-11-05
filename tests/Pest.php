@@ -18,6 +18,8 @@ uses(TestCase::class)->in(
     'Feature/Postgres/IndexStateCacheTest.php',
     'Feature/Postgres/ApplyTest.php',
     'Feature/Postgres/CandidatesTest.php',
+    'Feature/Postgres/DynamicRelationsTest.php',
+    'Feature/Postgres/EachKeysTest.php',
     'Feature/Postgres/PaletteRoundOneTest.php',
     'Feature/Postgres/PaletteRoundTwoTest.php',
     'Feature/Postgres/PlanShapeTest.php',

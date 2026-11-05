@@ -23,6 +23,20 @@ final class ColumnTypes
      */
     public function of(Model $model, string $table, string $column): string
     {
+        $type = $this->raw($model, $table, $column);
+
+        if (preg_match('/^[a-z][a-z0-9_]*$/', $type) !== 1) {
+            throw new InvalidFieldPath(sprintf('The column "%s.%s" has the type "%s", which cannot be used as a search key.', $table, $column, $type));
+        }
+
+        return $type;
+    }
+
+    /**
+     * The catalog type name of a column as it is (an array type starts with an underscore: `_text`).
+     */
+    public function raw(Model $model, string $table, string $column): string
+    {
         $connection = $model->getConnection();
         $key = $connection->getName().'|'.$table;
 
@@ -44,10 +58,6 @@ final class ColumnTypes
 
         if ($type === null) {
             throw new InvalidFieldPath(sprintf('The column "%s.%s" does not exist on the connection "%s".', $table, $column, $connection->getName()));
-        }
-
-        if (preg_match('/^[a-z][a-z0-9_]*$/', $type) !== 1) {
-            throw new InvalidFieldPath(sprintf('The column "%s.%s" has the type "%s", which cannot be used as a search key.', $table, $column, $type));
         }
 
         return $type;

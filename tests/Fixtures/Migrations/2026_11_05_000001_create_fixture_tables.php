@@ -131,5 +131,16 @@ return new class extends Migration
             $table->text('phone')->nullable();
             $table->timestampsTz(6);
         });
+
+        // Records whose identifiers live in a list: jsonb, json and a native text array.
+        Schema::create('coded_items', function (Blueprint $table): void {
+            $table->id();
+            $table->text('label')->nullable();
+            $table->jsonb('codes')->nullable();
+            $table->json('raw_codes')->nullable();
+            $table->text('plain')->nullable();
+            $table->rawColumn('tag_codes', 'text[]')->nullable();
+            $table->timestampsTz(6);
+        });
     }
 };

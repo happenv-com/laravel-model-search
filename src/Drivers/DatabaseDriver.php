@@ -7,6 +7,7 @@ namespace Happenv\ModelSearch\Drivers;
 use Closure;
 use Happenv\ModelSearch\Compilation\ColumnTypes;
 use Happenv\ModelSearch\Compilation\CompiledPath;
+use Happenv\ModelSearch\Compilation\RelationNames;
 use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Definition\CompiledField;
@@ -254,7 +255,7 @@ SQL;
     private function viaBranch(CompiledField $field, Probe $probe, bool $forTable, SearchQuery $query): ?Fragment
     {
         $child = new ($this->definition->modelClass);
-        $relation = method_exists($child, $field->path) ? $child->{$field->path}() : null;
+        $relation = RelationNames::find($child, $field->path);
 
         if (! $relation instanceof BelongsTo) {
             return null;

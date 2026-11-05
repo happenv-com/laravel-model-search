@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Compilation;
 
 use Happenv\ModelSearch\Exceptions\InvalidFieldPath;
+use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\UnsupportedRelation;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -35,7 +36,7 @@ final class PathCompiler
      * @param  class-string<Model>  $modelClass
      * @param  list<class-string>  $withScopes
      */
-    public function compile(string $modelClass, string $path, bool $translatable = false, array $withScopes = []): CompiledPath
+    public function compile(string $modelClass, string $path, bool $translatable = false, array $withScopes = [], bool $each = false): CompiledPath
     {
         $segments = explode('.', $path);
         $column = array_pop($segments);
@@ -134,6 +135,7 @@ final class PathCompiler
         }
 
         $columns[count($steps)][$column] = true;
+        $elements = $each ? $this->listShape($path, $models[count($steps)] ?? $rootModel, $tableNames[count($steps)], $column, $types) : null;
 
         $tables = [];
 
@@ -147,7 +149,23 @@ final class PathCompiler
         $rootColumns = array_keys($columns[0]);
         sort($rootColumns);
 
-        return new CompiledPath($root, $steps, $column, $translatable, $tables, array_values($hops), $rootColumns);
+        return new CompiledPath($root, $steps, $column, $translatable, $tables, array_values($hops), $rootColumns, $elements);
+    }
+
+    /**
+     * How the elements of a list column are read: a json or jsonb array, or a native PostgreSQL array.
+     *
+     * @return 'json'|'array'
+     */
+    private function listShape(string $path, Model $model, string $table, string $column, ColumnTypes $types): string
+    {
+        $type = $types->raw($model, $table, $column);
+
+        return match (true) {
+            $type === 'json' || $type === 'jsonb' => 'json',
+            str_starts_with($type, '_') => 'array',
+            default => throw new InvalidSearchDefinition(sprintf('"%s" is declared with each(), but the column "%s.%s" is a %s, not a list (json, jsonb or a PostgreSQL array).', $path, $table, $column, $type)),
+        };
     }
 
     /**
@@ -195,16 +213,20 @@ final class PathCompiler
     {
         $problem = sprintf('"%s" is not a relation of %s', $name, $model::class);
 
-        if (! method_exists($model, $name)) {
+        if (! RelationNames::exists($model, $name)) {
             throw new InvalidFieldPath($problem.'.');
         }
 
-        $method = new ReflectionMethod($model, $name);
-        $type = $method->getReturnType();
+        // A declared method must say that it is a relation before it is called; a resolver registered with
+        // `resolveRelationUsing()` was registered as one, and what it returns is checked below.
+        if (RelationNames::isDeclared($model, $name)) {
+            $method = new ReflectionMethod($model, $name);
+            $type = $method->getReturnType();
 
-        if (! $method->isPublic() || $method->isStatic() || $method->getNumberOfRequiredParameters() > 0
-            || ! $type instanceof ReflectionNamedType || ! is_a($type->getName(), Relation::class, true)) {
-            throw new InvalidFieldPath($problem.' (a relation method must be public and declare its relation as the return type).');
+            if (! $method->isPublic() || $method->isStatic() || $method->getNumberOfRequiredParameters() > 0
+                || ! $type instanceof ReflectionNamedType || ! is_a($type->getName(), Relation::class, true)) {
+                throw new InvalidFieldPath($problem.' (a relation method must be public and declare its relation as the return type).');
+            }
         }
 
         $relation = Relation::noConstraints(static fn (): mixed => $model->{$name}());
@@ -218,7 +240,7 @@ final class PathCompiler
         }
 
         if (! $relation instanceof Relation) {
-            throw new InvalidFieldPath($problem.'.');
+            throw new InvalidFieldPath($problem.' (it does not return a relation).');
         }
 
         return $relation;

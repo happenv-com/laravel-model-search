@@ -30,6 +30,8 @@ final class SearchField
 
     private bool $translatable = false;
 
+    private bool $each = false;
+
     private ?Closure $reveal = null;
 
     private int $weight = 1;
@@ -161,7 +163,42 @@ final class SearchField
             ));
         }
 
+        if ($this->each) {
+            throw new InvalidSearchDefinition(sprintf(
+                'exactOnSource() compares the column with the phrase, but "%s" holds a list (each()); a list is only read from the index.',
+                $this->path,
+            ));
+        }
+
         $this->exactOnSource = true;
+
+        return $this;
+    }
+
+    /**
+     * The column holds a list (a json or jsonb array, or a PostgreSQL array): every non-empty element, after the
+     * normalizer, is a key of the record of its own, with the kind, modes and reveal rule of the field. Strings and
+     * numbers are indexed (a number as its text); nulls, booleans, objects and nested lists are ignored. At most
+     * `each.max_per_record` elements per record are indexed, the first ones in array order.
+     */
+    public function each(): self
+    {
+        if ($this->type !== FieldType::Key) {
+            throw new InvalidSearchDefinition(sprintf('each() is only available on key fields, "%s" is a %s field.', $this->path, $this->type->value));
+        }
+
+        if ($this->exactOnSource) {
+            throw new InvalidSearchDefinition(sprintf(
+                'each() reads a list, but "%s" also asks for exactOnSource(), which compares the column with the phrase; a list is only read from the index.',
+                $this->path,
+            ));
+        }
+
+        if ($this->translatable) {
+            throw new InvalidSearchDefinition(sprintf('"%s" cannot be both translatable() and each().', $this->path));
+        }
+
+        $this->each = true;
 
         return $this;
     }
@@ -175,6 +212,10 @@ final class SearchField
 
     public function translatable(): self
     {
+        if ($this->each) {
+            throw new InvalidSearchDefinition(sprintf('"%s" cannot be both translatable() and each().', $this->path));
+        }
+
         $this->translatable = true;
 
         return $this;
@@ -233,6 +274,7 @@ final class SearchField
             reveal: $this->reveal,
             weight: $this->weight,
             declaredByExtension: $declaredByExtension,
+            each: $this->each,
         );
     }
 
