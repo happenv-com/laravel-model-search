@@ -20,8 +20,12 @@ return [
         'fan_out_limit' => 1000,
         'budget_ms' => 50000,
         'log_rebuild_threshold' => 1000000,
+        'unknown_grace_seconds' => 3600,
+        'foreign_grace_seconds' => 3600,
+        'allowed_transaction_level' => 0,
     ],
     'apply' => ['max_ids' => 10000],
     'lag_alarm_seconds' => 300,
+    'doctor' => ['timeout_ms' => 60000],
     'rate_limit' => ['max_attempts' => 30, 'decay_seconds' => 10],
 ];
