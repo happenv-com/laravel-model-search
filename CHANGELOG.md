@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (0.3.0)
+
+- **Breaking:** a relation on a field path (or a `via` field) that carries query conditions of its own (a where, a join, a `limit`, `ofMany()`, a group, a union) is refused with an `InvalidSearchDefinition` naming the model, the relation and the path. The index was built from the relation's keys only, so those conditions were silently ignored and it held rows the relation never returns. Ordering is still accepted. Conditions held by the relation's Eloquent builder (added or removed scopes, `afterQuery()`) are refused too, and conditions on a pivot table are not supported. Use a relation without conditions and declare the condition on the field.
+- New `SearchField::where($relation, $column, $value)` restricts the rows of one relation on the path (equality, or `IN` for a list; scalars and backed enums). It is applied in the projection, the backfill and the `database` driver, its column is watched by the triggers, and it is part of the fingerprint, and its value is checked against the column's type (domains are followed to their base type) and converted by PostgreSQL once at compile time. Built-in types are compared typed, other types as text; a column without btree equality, a `money` column and a `timestamptz` value without an offset are refused. See "Conditions on a path" in the README.
+
 ## v0.2.1 - 2026-11-05
 
 - `Doctor` and `Finding` are public: `Doctor::inspect()` returns a list of `Finding` (`code`, `message`, `subject`) for your own alerting. The README documents the shape.

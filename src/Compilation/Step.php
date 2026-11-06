@@ -18,6 +18,7 @@ final readonly class Step
      * @param  'child'|'self'  $shape
      * @param  array{sql: string, bindings: list<mixed>}|null  $derived  The table seen through the listed global scopes.
      * @param  bool  $multiplies  Whether one root can reach the same node through several rows of this step (pivot and through steps).
+     * @param  list<StepCondition>  $conditions  The restrictions the field puts on the rows of this step.
      */
     public function __construct(
         public string $quotedTable,
@@ -29,5 +30,14 @@ final readonly class Step
         public ?string $softDeleteColumn,
         public ?array $derived,
         public bool $multiplies = false,
+        public array $conditions = [],
     ) {}
+
+    /**
+     * @param  list<StepCondition>  $conditions
+     */
+    public function withConditions(array $conditions): self
+    {
+        return new self($this->quotedTable, $this->fromColumn, $this->toColumn, $this->shape, $this->morphColumn, $this->morphValue, $this->softDeleteColumn, $this->derived, $this->multiplies, $conditions);
+    }
 }

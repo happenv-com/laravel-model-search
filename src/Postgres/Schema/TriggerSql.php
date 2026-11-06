@@ -218,8 +218,8 @@ final readonly class TriggerSql
     }
 
     /**
-     * Whether the record belongs to the watched path: it has a key, and a polymorphic child has
-     * the discriminator of the path.
+     * Whether the record belongs to the watched path: it has a key, a polymorphic child has the
+     * discriminator of the path, and the row satisfies the conditions the field put on the step.
      */
     private function matches(WatchedTable $entry, string $record): string
     {
@@ -227,6 +227,14 @@ final readonly class TriggerSql
 
         if ($entry->morphColumn !== null && $entry->morphValue !== null) {
             $condition .= sprintf(' AND %s.%s::text = %s', $record, Sql::ident($entry->morphColumn), self::literal($entry->morphValue));
+        }
+
+        foreach ($entry->conditions as $step) {
+            // Typed for a built-in type (its operators live in pg_catalog, which the fixed search_path keeps), as text
+            // for any other, whose operator may live outside the search_path.
+            $column = sprintf('%s.%s%s', $record, Sql::ident($step->column), $step->typedAs === null ? '::text' : '');
+            $values = array_map(static fn (bool|float|int|string $value): string => $step->typedAs === null ? self::literal((string) $value) : sprintf('CAST(%s AS %s)', self::literal((string) $value), $step->typedAs), $step->values);
+            $condition .= count($values) === 1 ? sprintf(' AND %s = %s', $column, $values[0]) : sprintf(' AND %s IN (%s)', $column, implode(', ', $values));
         }
 
         return $condition;

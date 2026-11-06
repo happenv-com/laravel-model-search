@@ -21,6 +21,7 @@ return new class extends Migration
             $table->text('name')->nullable();
             $table->text('phone')->nullable();
             $table->text('code')->nullable();
+            $table->text('kind')->nullable();
             $table->bigInteger('country_id')->nullable();
             $table->timestampsTz(6);
             $table->index('country_id');
@@ -48,6 +49,8 @@ return new class extends Migration
             $table->uuid('order_id');
             $table->text('market_order_number');
             $table->text('order_signature')->nullable();
+            $table->text('kind')->nullable();
+            $table->text('status')->nullable();
             $table->timestampsTz(6);
             $table->index('order_id');
             $table->index('order_signature');
@@ -69,6 +72,19 @@ return new class extends Migration
             $table->text('tracking_number')->nullable();
             $table->timestampsTz(6);
             $table->index('parcel_id');
+            $table->index('order_id');
+        });
+
+        Schema::create('probe_rows', function (Blueprint $table): void {
+            $table->uuid('id')->primary();
+            $table->uuid('order_id')->nullable();
+            $table->text('label')->nullable();
+            $table->integer('level')->nullable();
+            $table->boolean('flag')->nullable();
+            $table->double('score')->nullable();
+            $table->timestampTz('at', 6)->nullable();
+            $table->date('day')->nullable();
+            $table->rawColumn('amount', 'numeric')->nullable();
             $table->index('order_id');
         });
 

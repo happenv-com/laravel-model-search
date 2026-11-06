@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Happenv\ModelSearch\Definition;
 
+use BackedEnum;
 use Closure;
+use Happenv\ModelSearch\Compilation\StepCondition;
 use Happenv\ModelSearch\Exceptions\InvalidFieldPath;
 use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\ReservedKind;
@@ -35,6 +37,9 @@ final class SearchField
     private ?Closure $reveal = null;
 
     private int $weight = 1;
+
+    /** @var list<StepCondition> */
+    private array $conditions = [];
 
     /**
      * @param  list<string>  $kinds
@@ -203,6 +208,30 @@ final class SearchField
         return $this;
     }
 
+    /**
+     * Restricts the rows of one relation of the path: only rows whose column equals the value (or is one of the
+     * values) are indexed, exactly as if the relation had that condition. The relation is the segment of this field's
+     * path the condition applies to, by its dotted name (`documents`, or `order.documents` for a deeper step); the
+     * column belongs to the table that step reaches (for a many-to-many or a through relation, the related table).
+     *
+     * A relation on a path must not carry conditions of its own: they are refused when the definition is compiled,
+     * because the index would hold rows the relation never returns. Declare the condition here instead. Several calls
+     * combine with AND. Only equality and "any of" are supported; the value is a scalar, a backed enum, or a non-empty
+     * list of them.
+     *
+     * @param  bool|float|int|string|BackedEnum|list<bool|float|int|string|BackedEnum>  $value
+     */
+    public function where(string $relation, string $column, bool|float|int|string|BackedEnum|array $value): self
+    {
+        if ($this->type === FieldType::Via) {
+            throw new InvalidSearchDefinition(sprintf('where() restricts the relations of a field path; the via field "%s" follows the fields of the related definition and cannot be restricted.', $this->path));
+        }
+
+        $this->conditions[] = StepCondition::of($relation, $column, $value);
+
+        return $this;
+    }
+
     public function normalizeUsing(Normalizer $normalizer): self
     {
         $this->normalizer = $normalizer;
@@ -275,6 +304,7 @@ final class SearchField
             weight: $this->weight,
             declaredByExtension: $declaredByExtension,
             each: $this->each,
+            conditions: $this->conditions,
         );
     }
 

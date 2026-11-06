@@ -23,6 +23,7 @@ final readonly class WatchedTable
      * @param  'child'|'self'  $shape
      * @param  string  $connection  Name of the connection the table lives on.
      * @param  string  $quotedTable  The table as it is written in SQL: prefixed and quoted.
+     * @param  list<StepCondition>  $conditions  Only rows that satisfy all of them belong to the path (the OLD and the NEW row are both tested).
      */
     public function __construct(
         public string $table,
@@ -34,11 +35,12 @@ final readonly class WatchedTable
         public ?string $morphValue,
         public string $connection,
         public string $quotedTable,
+        public array $conditions = [],
     ) {}
 
     public function identity(): string
     {
-        return implode('|', [$this->connection, $this->table, $this->shape, $this->parentNodeType, $this->fkColumn, $this->morphColumn ?? '', $this->morphValue ?? '']);
+        return implode('|', [$this->connection, $this->table, $this->shape, $this->parentNodeType, $this->fkColumn, $this->morphColumn ?? '', $this->morphValue ?? '', json_encode(array_map(static fn (StepCondition $condition): array => $condition->toArray(), $this->conditions), JSON_THROW_ON_ERROR)]);
     }
 
     /**
@@ -49,6 +51,6 @@ final readonly class WatchedTable
         $columns = array_values(array_unique($columns));
         sort($columns);
 
-        return new self($this->table, $columns, $this->shape, $this->parentNodeType, $this->fkColumn, $this->morphColumn, $this->morphValue, $this->connection, $this->quotedTable);
+        return new self($this->table, $columns, $this->shape, $this->parentNodeType, $this->fkColumn, $this->morphColumn, $this->morphValue, $this->connection, $this->quotedTable, $this->conditions);
     }
 }

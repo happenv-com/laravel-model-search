@@ -17,8 +17,10 @@ use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
+use Illuminate\Database\QueryException;
 use ReflectionMethod;
 use ReflectionNamedType;
+use ReflectionProperty;
 
 /**
  * Turns a dotted field path (`billingAddress.phone`) into SQL over the source tables, using the
@@ -35,11 +37,13 @@ final class PathCompiler
     /**
      * @param  class-string<Model>  $modelClass
      * @param  list<class-string>  $withScopes
+     * @param  list<StepCondition>  $conditions  Restrictions of the field on the rows of the relations of its path.
      */
-    public function compile(string $modelClass, string $path, bool $translatable = false, array $withScopes = [], bool $each = false): CompiledPath
+    public function compile(string $modelClass, string $path, bool $translatable = false, array $withScopes = [], bool $each = false, array $conditions = []): CompiledPath
     {
         $segments = explode('.', $path);
         $column = array_pop($segments);
+        $conditionsByRelation = $this->conditionsByRelation($path, $segments, $conditions);
         $rootModel = new $modelClass;
         $types = new ColumnTypes;
         $connection = Sql::connectionName($rootModel);
@@ -80,9 +84,18 @@ final class PathCompiler
         };
 
         $current = $rootModel;
+        $trail = '';
 
         foreach ($segments as $name) {
-            foreach ($this->stepsOf($this->relationOf($current, $name), $current, $withScopes, $connection) as [$step, $toModel, $toTable]) {
+            $trail = $trail === '' ? $name : $trail.'.'.$name;
+            $reached = $this->stepsOf($this->relationOf($current, $name, $path), $current, $withScopes, $connection);
+
+            foreach ($reached as $index => [$step, $toModel, $toTable]) {
+                // The condition restricts the table the relation reaches: its last step.
+                if ($index === array_key_last($reached) && isset($conditionsByRelation[$trail])) {
+                    $step = $step->withConditions($this->checkedConditions($path, $toModel, $toTable, $conditionsByRelation[$trail], $types));
+                }
+
                 $depth = count($steps) + 1;
                 $previous = $depth - 1;
                 $previousModel = $models[$previous];
@@ -122,6 +135,10 @@ final class PathCompiler
                     $columns[$depth][$step->softDeleteColumn] = true;
                 }
 
+                foreach ($step->conditions as $condition) {
+                    $columns[$depth][$condition->column] = true;
+                }
+
                 $steps[] = $step;
             }
 
@@ -143,7 +160,7 @@ final class PathCompiler
             $depth = $index + 1;
             $names = array_keys($columns[$depth]);
             sort($names);
-            $tables[] = new WatchedTable($tableNames[$depth], $names, $shape, $parentNodeType, $fk, $step->morphColumn, $step->morphValue, $connection, $step->quotedTable);
+            $tables[] = new WatchedTable($tableNames[$depth], $names, $shape, $parentNodeType, $fk, $step->morphColumn, $step->morphValue, $connection, $step->quotedTable, $step->conditions);
         }
 
         $rootColumns = array_keys($columns[0]);
@@ -175,7 +192,7 @@ final class PathCompiler
      */
     public function assertRelation(string $modelClass, string $name): void
     {
-        $relation = $this->relationOf(new $modelClass, $name);
+        $relation = $this->relationOf(new $modelClass, $name, $name);
 
         if (! $relation instanceof BelongsTo) {
             throw new UnsupportedRelation(sprintf(
@@ -209,7 +226,7 @@ final class PathCompiler
     /**
      * @return Relation<*, *, *>
      */
-    private function relationOf(Model $model, string $name): Relation
+    private function relationOf(Model $model, string $name, string $path): Relation
     {
         $problem = sprintf('"%s" is not a relation of %s', $name, $model::class);
 
@@ -243,7 +260,247 @@ final class PathCompiler
             throw new InvalidFieldPath($problem.' (it does not return a relation).');
         }
 
+        $this->assertNoConditions($relation, $model, $name, $path);
+
         return $relation;
+    }
+
+    /**
+     * Refuses a relation whose query does more than join the two tables on their keys: the path is compiled from the
+     * keys alone, so every condition would be ignored and the index would hold rows the relation never returns.
+     * Ordering does not change which rows there are, so it is accepted.
+     *
+     * @param  Relation<*, *, *>  $relation  Built without its key constraints.
+     */
+    private function assertNoConditions(Relation $relation, Model $model, string $name, string $path): void
+    {
+        $query = $relation->getQuery()->getQuery();
+        $joins = $query->joins ?? [];
+
+        $pivotTable = $relation instanceof BelongsToMany ? $relation->getTable() : null;
+
+        // A pivot or through relation joins its intermediate table by itself; any other join is the relation's own.
+        $intermediate = match (true) {
+            $relation instanceof BelongsToMany => $relation->getTable(),
+            $relation instanceof HasOneOrManyThrough => $relation->getParent()->getTable(),
+            default => null,
+        };
+
+        if ($intermediate !== null && $joins !== [] && $joins[0]->table === $intermediate) {
+            array_shift($joins);
+        }
+
+        $found = array_keys(array_filter([
+            'where' => $query->wheres !== [],
+            'join' => $joins !== [],
+            'limit' => $query->limit !== null || ($query->groupLimit ?? null) !== null,
+            'offset' => $query->offset !== null,
+            'group by' => ($query->groups ?? []) !== [],
+            'having' => ($query->havings ?? []) !== [],
+            'union' => ($query->unions ?? []) !== [],
+            // latestOfMany() and ofMany() pick one row per parent; their join is only added once the relation is queried.
+            'one-of-many' => method_exists($relation, 'isOneOfMany') && $relation->isOneOfMany(),
+            'before-query callback' => $query->beforeQueryCallbacks !== [],
+            'after-query callback' => $this->builderProperty($relation, 'afterQueryCallbacks') !== [],
+            'global scope added to the relation' => array_diff(array_keys($this->builderProperty($relation, 'scopes')), array_keys($relation->getRelated()->getGlobalScopes()), $relation instanceof HasOneOrManyThrough ? ['SoftDeletableHasManyThrough'] : []) !== [],
+            'removed global scope' => $relation->getQuery()->removedScopes() !== [],
+        ]));
+
+        if ($found === []) {
+            return;
+        }
+
+        $pivot = $pivotTable !== null && array_any($query->wheres, static fn (array $where): bool => is_string($where['column'] ?? null) && str_starts_with($where['column'], $pivotTable.'.'));
+
+        throw new InvalidSearchDefinition(sprintf(
+            '%s::%s() carries query conditions (%s), but the field path "%s" is compiled from the relation\'s keys only, so the index would hold rows the relation never returns. Use a relation without query conditions on the path and declare the condition on the field: SearchField::key(\'%s\')->where(\'%s\', \'<column>\', <value>).%s',
+            $model::class,
+            $name,
+            implode(', ', $found),
+            $path,
+            $path,
+            $name,
+            $pivot ? ' Conditions on a pivot table are not supported, neither on the relation nor on the field.' : '',
+        ));
+    }
+
+    /**
+     * A protected property of the relation's Eloquent builder that has no accessor (the scopes it carries, the
+     * callbacks it runs after the query).
+     *
+     * @param  Relation<*, *, *>  $relation
+     * @return array<array-key, mixed>
+     */
+    private function builderProperty(Relation $relation, string $property): array
+    {
+        $builder = $relation->getQuery();
+        $value = new ReflectionProperty($builder, $property)->getValue($builder);
+
+        return is_array($value) ? $value : [];
+    }
+
+    /**
+     * @param  list<string>  $segments  The relation segments of the field path.
+     * @param  list<StepCondition>  $conditions
+     * @return array<string, list<StepCondition>> By the dotted relation name.
+     */
+    private function conditionsByRelation(string $path, array $segments, array $conditions): array
+    {
+        $known = [];
+        $trail = '';
+
+        foreach ($segments as $segment) {
+            $trail = $trail === '' ? $segment : $trail.'.'.$segment;
+            $known[$trail] = true;
+        }
+
+        $byRelation = [];
+
+        foreach ($conditions as $condition) {
+            if (! isset($known[$condition->relation])) {
+                throw new InvalidSearchDefinition(sprintf(
+                    'The field "%s" restricts the relation "%s", but that is not a relation segment of its path%s.',
+                    $path,
+                    $condition->relation,
+                    $known === [] ? ' (the path has no relations)' : ' (the relations of the path are: '.implode(', ', array_map(strval(...), array_keys($known))).')',
+                ));
+            }
+
+            $byRelation[$condition->relation][] = $condition;
+        }
+
+        return $byRelation;
+    }
+
+    /**
+     * Checks every value against the type of its column and replaces it with its text form in that type, which is
+     * what the projection and the triggers both compare (`column::text = 'value'`), so they always agree. PostgreSQL
+     * does the conversion, once, here: a value the column cannot hold is refused instead of breaking every write.
+     *
+     * @param  list<StepCondition>  $conditions
+     * @return list<StepCondition>
+     */
+    private function checkedConditions(string $path, ?Model $model, string $table, array $conditions, ColumnTypes $types): array
+    {
+        $checked = [];
+
+        foreach ($conditions as $condition) {
+            if (! $model instanceof Model) {
+                throw new InvalidSearchDefinition(sprintf('The condition on "%s.%s" of the field "%s" cannot be applied: the step has no model.', $condition->relation, $condition->column, $path));
+            }
+
+            try {
+                $types->raw($model, $table, $condition->column);
+                $resolved = $types->resolved($model, Sql::table($model), $condition->column);
+            } catch (InvalidFieldPath) {
+                throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the column "%s", but the table "%s" that relation reaches has no such column.', $path, $condition->relation, $condition->column, $table));
+            }
+
+            $type = $resolved['name'];
+            $formatted = $resolved['formatted'];
+
+            if ($type === 'money') {
+                throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the money column "%s", but the text of money depends on lc_monetary, so it cannot be compared reliably; compare a numeric column instead.', $path, $condition->relation, $condition->column));
+            }
+
+            if (! $resolved['comparable']) {
+                throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the column "%s" (%s), but that type has no equality operator (no default btree operator class), so it cannot be compared.', $path, $condition->relation, $condition->column, $formatted));
+            }
+
+            $texts = [];
+
+            foreach ($condition->values as $value) {
+                $texts[] = $this->textOf($path, $condition, $type, $formatted, $value);
+            }
+
+            $checked[] = $condition->withTexts(
+                $this->castedTexts($path, $condition, $formatted, $texts, $model),
+                $resolved['builtIn'] ? $formatted : null,
+            );
+        }
+
+        usort($checked, static fn (StepCondition $a, StepCondition $b): int => [$a->column, $a->values] <=> [$b->column, $b->values]);
+
+        return $checked;
+    }
+
+    private function textOf(string $path, StepCondition $condition, string $type, string $formatted, bool|float|int|string $value): string
+    {
+        $fits = match (true) {
+            $type === 'bool' => is_bool($value),
+            in_array($type, ['int2', 'int4', 'int8', 'numeric', 'float4', 'float8'], true) => is_int($value) || is_float($value),
+            in_array($type, ['text', 'varchar', 'bpchar', 'name', 'citext'], true) => ! is_bool($value),
+            default => is_string($value),
+        };
+
+        if (! $fits) {
+            throw new InvalidSearchDefinition($this->cannotHold($path, $condition, $formatted, $value));
+        }
+
+        // Without an offset after the time the instant would depend on the time zone of whoever reads the text: refuse, do not guess.
+        // The time is required, so the day of a bare date ('2026-01-01') is not read as an offset.
+        if (in_array($type, ['timestamptz', 'timetz'], true) && preg_match('/\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)\s*$/i', (string) $value) !== 1) {
+            throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the column "%s" (%s) with the value %s, which has no offset (such as +00:00 or Z); the instant would depend on a time zone.', $path, $condition->relation, $condition->column, $formatted, var_export($value, true)));
+        }
+
+        return is_bool($value) ? ($value ? 'true' : 'false') : (string) $value;
+    }
+
+    private function cannotHold(string $path, StepCondition $condition, string $formatted, mixed $value): string
+    {
+        return sprintf('The field "%s" restricts "%s" by the column "%s" (%s) with the value %s, which that column cannot hold.', $path, $condition->relation, $condition->column, $formatted, var_export($value, true));
+    }
+
+    /**
+     * The text form of the values in the type of the column, as PostgreSQL itself writes it, read in a fixed
+     * environment (UTC, ISO dates, ISO 8601 intervals) so that it means the same in every session that parses it
+     * again. One query per condition; a value the column cannot hold refuses the definition.
+     *
+     * @param  list<string>  $texts
+     * @return list<string>
+     */
+    private function castedTexts(string $path, StepCondition $condition, string $formatted, array $texts, Model $model): array
+    {
+        $cast = $this->tryCast($model, $formatted, $texts);
+
+        if ($cast !== null) {
+            return $cast;
+        }
+
+        // Name the value that does not fit.
+        foreach ($texts as $index => $text) {
+            if ($this->tryCast($model, $formatted, [$text]) === null) {
+                throw new InvalidSearchDefinition($this->cannotHold($path, $condition, $formatted, $condition->values[$index] ?? $text));
+            }
+        }
+
+        throw new InvalidSearchDefinition($this->cannotHold($path, $condition, $formatted, implode(', ', $texts)));
+    }
+
+    /**
+     * @param  list<string>  $texts
+     * @return list<string>|null Null when PostgreSQL refuses one of the values.
+     */
+    private function tryCast(Model $model, string $formatted, array $texts): ?array
+    {
+        $connection = $model->getConnection();
+        $select = implode(', ', array_map(static fn (int $index): string => sprintf('CAST(?::text AS %s)::text AS "v%d"', $formatted, $index), array_keys($texts)));
+
+        // Always rolled back (to a savepoint inside the caller's transaction): a failed cast must not poison it, and
+        // the settings must not outlive the check.
+        $connection->beginTransaction();
+
+        try {
+            $connection->statement("SET LOCAL TimeZone = 'UTC'");
+            $connection->statement("SET LOCAL DateStyle = 'ISO, YMD'");
+            $connection->statement("SET LOCAL IntervalStyle = 'iso_8601'");
+
+            return array_values(array_map(strval(...), (array) $connection->selectOne('SELECT '.$select, $texts)));
+        } catch (QueryException) {
+            return null;
+        } finally {
+            $connection->rollBack();
+        }
     }
 
     /**

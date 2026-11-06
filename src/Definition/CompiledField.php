@@ -6,6 +6,7 @@ namespace Happenv\ModelSearch\Definition;
 
 use Closure;
 use Happenv\ModelSearch\Compilation\CompiledPath;
+use Happenv\ModelSearch\Compilation\StepCondition;
 use Happenv\ModelSearch\Normalization\Normalizer;
 
 /**
@@ -16,6 +17,7 @@ final readonly class CompiledField
     /**
      * @param  list<Mode>  $modes
      * @param  bool  $each  The column holds a list; every element is a key of the record.
+     * @param  list<StepCondition>  $conditions  Restrictions of the field on the rows of the steps of its path.
      * @param  list<string>  $via  For a via field: the kinds of the related record to follow.
      * @param  (Closure(): string)|null  $label
      */
@@ -34,6 +36,7 @@ final readonly class CompiledField
         public bool $declaredByExtension,
         public ?CompiledPath $compiledPath = null,
         public bool $each = false,
+        public array $conditions = [],
     ) {}
 
     public function withCompiledPath(CompiledPath $compiledPath): self
@@ -53,6 +56,7 @@ final readonly class CompiledField
             $this->declaredByExtension,
             $compiledPath,
             $this->each,
+            $this->conditions,
         );
     }
 }
