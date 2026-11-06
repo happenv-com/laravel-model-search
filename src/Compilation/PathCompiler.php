@@ -35,11 +35,13 @@ final class PathCompiler
     /**
      * @param  class-string<Model>  $modelClass
      * @param  list<class-string>  $withScopes
+     * @param  list<StepCondition>  $conditions  Restrictions of the field on the rows of the relations of its path.
      */
-    public function compile(string $modelClass, string $path, bool $translatable = false, array $withScopes = [], bool $each = false): CompiledPath
+    public function compile(string $modelClass, string $path, bool $translatable = false, array $withScopes = [], bool $each = false, array $conditions = []): CompiledPath
     {
         $segments = explode('.', $path);
         $column = array_pop($segments);
+        $conditionsByRelation = $this->conditionsByRelation($path, $segments, $conditions);
         $rootModel = new $modelClass;
         $types = new ColumnTypes;
         $connection = Sql::connectionName($rootModel);
@@ -80,9 +82,18 @@ final class PathCompiler
         };
 
         $current = $rootModel;
+        $trail = '';
 
         foreach ($segments as $name) {
-            foreach ($this->stepsOf($this->relationOf($current, $name), $current, $withScopes, $connection) as [$step, $toModel, $toTable]) {
+            $trail = $trail === '' ? $name : $trail.'.'.$name;
+            $reached = $this->stepsOf($this->relationOf($current, $name, $path), $current, $withScopes, $connection);
+
+            foreach ($reached as $index => [$step, $toModel, $toTable]) {
+                // The condition restricts the table the relation reaches: its last step.
+                if ($index === array_key_last($reached) && isset($conditionsByRelation[$trail])) {
+                    $step = $step->withConditions($this->checkedConditions($path, $toModel, $toTable, $conditionsByRelation[$trail], $types));
+                }
+
                 $depth = count($steps) + 1;
                 $previous = $depth - 1;
                 $previousModel = $models[$previous];
@@ -122,6 +133,10 @@ final class PathCompiler
                     $columns[$depth][$step->softDeleteColumn] = true;
                 }
 
+                foreach ($step->conditions as $condition) {
+                    $columns[$depth][$condition->column] = true;
+                }
+
                 $steps[] = $step;
             }
 
@@ -143,7 +158,7 @@ final class PathCompiler
             $depth = $index + 1;
             $names = array_keys($columns[$depth]);
             sort($names);
-            $tables[] = new WatchedTable($tableNames[$depth], $names, $shape, $parentNodeType, $fk, $step->morphColumn, $step->morphValue, $connection, $step->quotedTable);
+            $tables[] = new WatchedTable($tableNames[$depth], $names, $shape, $parentNodeType, $fk, $step->morphColumn, $step->morphValue, $connection, $step->quotedTable, $step->conditions);
         }
 
         $rootColumns = array_keys($columns[0]);
@@ -175,7 +190,7 @@ final class PathCompiler
      */
     public function assertRelation(string $modelClass, string $name): void
     {
-        $relation = $this->relationOf(new $modelClass, $name);
+        $relation = $this->relationOf(new $modelClass, $name, $name);
 
         if (! $relation instanceof BelongsTo) {
             throw new UnsupportedRelation(sprintf(
@@ -209,7 +224,7 @@ final class PathCompiler
     /**
      * @return Relation<*, *, *>
      */
-    private function relationOf(Model $model, string $name): Relation
+    private function relationOf(Model $model, string $name, string $path): Relation
     {
         $problem = sprintf('"%s" is not a relation of %s', $name, $model::class);
 
@@ -243,7 +258,114 @@ final class PathCompiler
             throw new InvalidFieldPath($problem.' (it does not return a relation).');
         }
 
+        $this->assertNoConditions($relation, $model, $name, $path);
+
         return $relation;
+    }
+
+    /**
+     * Refuses a relation whose query does more than join the two tables on their keys: the path is compiled from the
+     * keys alone, so every condition would be ignored and the index would hold rows the relation never returns.
+     * Ordering does not change which rows there are, so it is accepted.
+     *
+     * @param  Relation<*, *, *>  $relation  Built without its key constraints.
+     */
+    private function assertNoConditions(Relation $relation, Model $model, string $name, string $path): void
+    {
+        $query = $relation->getQuery()->getQuery();
+        $joins = $query->joins ?? [];
+
+        // A pivot or through relation joins its intermediate table by itself; any other join is the relation's own.
+        $intermediate = match (true) {
+            $relation instanceof BelongsToMany => $relation->getTable(),
+            $relation instanceof HasOneOrManyThrough => $relation->getParent()->getTable(),
+            default => null,
+        };
+
+        if ($intermediate !== null && $joins !== [] && $joins[0]->table === $intermediate) {
+            array_shift($joins);
+        }
+
+        $found = array_keys(array_filter([
+            'where' => $query->wheres !== [],
+            'join' => $joins !== [],
+            'limit' => $query->limit !== null || ($query->groupLimit ?? null) !== null,
+            'offset' => $query->offset !== null,
+            'group by' => ($query->groups ?? []) !== [],
+            'having' => ($query->havings ?? []) !== [],
+            'union' => ($query->unions ?? []) !== [],
+            // latestOfMany() and ofMany() pick one row per parent; their join is only added once the relation is queried.
+            'one-of-many' => method_exists($relation, 'isOneOfMany') && $relation->isOneOfMany(),
+            'before-query callback' => $query->beforeQueryCallbacks !== [],
+        ]));
+
+        if ($found === []) {
+            return;
+        }
+
+        throw new InvalidSearchDefinition(sprintf(
+            '%s::%s() carries query conditions (%s), but the field path "%s" is compiled from the relation\'s keys only, so the index would hold rows the relation never returns. Use a relation without query conditions on the path and declare the condition on the field: SearchField::key(\'%s\')->where(\'%s\', \'<column>\', <value>).',
+            $model::class,
+            $name,
+            implode(', ', $found),
+            $path,
+            $path,
+            $name,
+        ));
+    }
+
+    /**
+     * @param  list<string>  $segments  The relation segments of the field path.
+     * @param  list<StepCondition>  $conditions
+     * @return array<string, list<StepCondition>> By the dotted relation name.
+     */
+    private function conditionsByRelation(string $path, array $segments, array $conditions): array
+    {
+        $known = [];
+        $trail = '';
+
+        foreach ($segments as $segment) {
+            $trail = $trail === '' ? $segment : $trail.'.'.$segment;
+            $known[$trail] = true;
+        }
+
+        $byRelation = [];
+
+        foreach ($conditions as $condition) {
+            if (! isset($known[$condition->relation])) {
+                throw new InvalidSearchDefinition(sprintf(
+                    'The field "%s" restricts the relation "%s", but that is not a relation segment of its path%s.',
+                    $path,
+                    $condition->relation,
+                    $known === [] ? ' (the path has no relations)' : ' (the relations of the path are: '.implode(', ', array_map(strval(...), array_keys($known))).')',
+                ));
+            }
+
+            $byRelation[$condition->relation][] = $condition;
+        }
+
+        return $byRelation;
+    }
+
+    /**
+     * @param  list<StepCondition>  $conditions
+     * @return list<StepCondition>
+     */
+    private function checkedConditions(string $path, ?Model $model, string $table, array $conditions, ColumnTypes $types): array
+    {
+        foreach ($conditions as $condition) {
+            if (! $model instanceof Model) {
+                throw new InvalidSearchDefinition(sprintf('The condition on "%s.%s" of the field "%s" cannot be applied: the step has no model.', $condition->relation, $condition->column, $path));
+            }
+
+            try {
+                $types->raw($model, $table, $condition->column);
+            } catch (InvalidFieldPath) {
+                throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the column "%s", but the table "%s" that relation reaches has no such column.', $path, $condition->relation, $condition->column, $table));
+            }
+        }
+
+        return $conditions;
     }
 
     /**

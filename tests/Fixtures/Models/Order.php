@@ -184,4 +184,120 @@ class Order extends Model
     {
         return $this->belongsTo(ElsewhereAddress::class, 'billing_address_id');
     }
+
+    /**
+     * @return HasOne<MarketOrder, $this>
+     */
+    public function whereMarketOrder(): HasOne
+    {
+        return $this->hasOne(MarketOrder::class, 'order_id')->where('kind', 'order');
+    }
+
+    /**
+     * @return HasOne<MarketOrder, $this>
+     */
+    public function nestedWhereMarketOrder(): HasOne
+    {
+        return $this->hasOne(MarketOrder::class, 'order_id')->where(static function ($query): void {
+            $query->where('kind', 'order')->orWhere('status', 'created');
+        });
+    }
+
+    /**
+     * @return HasOne<MarketOrder, $this>
+     */
+    public function rawWhereMarketOrder(): HasOne
+    {
+        return $this->hasOne(MarketOrder::class, 'order_id')->whereRaw("kind = 'order'");
+    }
+
+    /**
+     * @return HasOne<MarketOrder, $this>
+     */
+    public function joinedMarketOrder(): HasOne
+    {
+        return $this->hasOne(MarketOrder::class, 'order_id')->join('addresses', 'addresses.id', '=', 'market_orders.order_id');
+    }
+
+    /**
+     * @return HasOne<MarketOrder, $this>
+     */
+    public function limitedMarketOrder(): HasOne
+    {
+        return $this->hasOne(MarketOrder::class, 'order_id')->limit(1);
+    }
+
+    /**
+     * @return HasOne<MarketOrder, $this>
+     */
+    public function latestMarketOrder(): HasOne
+    {
+        return $this->hasOne(MarketOrder::class, 'order_id')->latestOfMany();
+    }
+
+    /**
+     * Ordering does not change which rows the relation holds.
+     *
+     * @return HasOne<MarketOrder, $this>
+     */
+    public function orderedMarketOrder(): HasOne
+    {
+        return $this->hasOne(MarketOrder::class, 'order_id')->orderByDesc('market_order_number');
+    }
+
+    /**
+     * @return BelongsTo<Address, $this>
+     */
+    public function whereBillingAddress(): BelongsTo
+    {
+        return $this->belongsTo(Address::class, 'billing_address_id')->where('kind', 'billing');
+    }
+
+    /**
+     * @return HasMany<MarketOrder, $this>
+     */
+    public function whereMarketOrders(): HasMany
+    {
+        return $this->hasMany(MarketOrder::class, 'order_id')->whereNotNull('status');
+    }
+
+    /**
+     * @return HasManyThrough<CarrierUnit, Parcel, $this>
+     */
+    public function whereParcelCarrierUnits(): HasManyThrough
+    {
+        return $this->hasManyThrough(CarrierUnit::class, Parcel::class, 'order_id', 'parcel_id')->where('tracking_number', 'T-1');
+    }
+
+    /**
+     * @return HasManyThrough<CarrierUnit, Parcel, $this>
+     */
+    public function limitedParcelCarrierUnits(): HasManyThrough
+    {
+        return $this->hasManyThrough(CarrierUnit::class, Parcel::class, 'order_id', 'parcel_id')->limit(3);
+    }
+
+    /**
+     * @return BelongsToMany<Tag, $this>
+     */
+    public function whereTags(): BelongsToMany
+    {
+        return $this->belongsToMany(Tag::class, 'order_tag', 'order_id', 'tag_id')->where('name', 'vip');
+    }
+
+    /**
+     * @return BelongsToMany<Tag, $this>
+     */
+    public function wherePivotTags(): BelongsToMany
+    {
+        return $this->belongsToMany(Tag::class, 'order_tag', 'order_id', 'tag_id')->wherePivot('tag_id', '>', 0);
+    }
+
+    /**
+     * @return MorphMany<Note, $this>
+     */
+    public function whereNotes(): MorphMany
+    {
+        return $this->morphMany(Note::class, 'noteable')->where('body', 'pinned');
+    }
 }

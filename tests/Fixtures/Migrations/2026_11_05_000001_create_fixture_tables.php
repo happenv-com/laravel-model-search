@@ -21,6 +21,7 @@ return new class extends Migration
             $table->text('name')->nullable();
             $table->text('phone')->nullable();
             $table->text('code')->nullable();
+            $table->text('kind')->nullable();
             $table->bigInteger('country_id')->nullable();
             $table->timestampsTz(6);
             $table->index('country_id');
@@ -48,6 +49,8 @@ return new class extends Migration
             $table->uuid('order_id');
             $table->text('market_order_number');
             $table->text('order_signature')->nullable();
+            $table->text('kind')->nullable();
+            $table->text('status')->nullable();
             $table->timestampsTz(6);
             $table->index('order_id');
             $table->index('order_signature');
