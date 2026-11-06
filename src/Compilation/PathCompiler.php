@@ -396,13 +396,20 @@ final class PathCompiler
                 throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the column "%s", but the table "%s" that relation reaches has no such column.', $path, $condition->relation, $condition->column, $table));
             }
 
+            if ($type === 'money') {
+                throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the money column "%s", but the text of money depends on lc_monetary, so it cannot be compared reliably; compare a numeric column instead.', $path, $condition->relation, $condition->column));
+            }
+
             $texts = [];
 
             foreach ($condition->values as $value) {
-                $texts[] = $this->textOf($path, $condition, $type, $formatted, $value, $model);
+                $texts[] = $this->textOf($path, $condition, $type, $formatted, $value);
             }
 
-            $checked[] = $condition->withTexts($texts);
+            $checked[] = $condition->withTexts(
+                $this->castedTexts($path, $condition, $formatted, $texts, $model),
+                $types->isBuiltIn($model, Sql::table($model), $condition->column) ? $formatted : null,
+            );
         }
 
         usort($checked, static fn (StepCondition $a, StepCondition $b): int => [$a->column, $a->values] <=> [$b->column, $b->values]);
@@ -410,7 +417,7 @@ final class PathCompiler
         return $checked;
     }
 
-    private function textOf(string $path, StepCondition $condition, string $type, string $formatted, bool|float|int|string $value, Model $model): string
+    private function textOf(string $path, StepCondition $condition, string $type, string $formatted, bool|float|int|string $value): string
     {
         $fits = match (true) {
             $type === 'bool' => is_bool($value),
@@ -419,23 +426,68 @@ final class PathCompiler
             default => is_string($value),
         };
 
-        $problem = sprintf('The field "%s" restricts "%s" by the column "%s" (%s) with the value %s, which that column cannot hold', $path, $condition->relation, $condition->column, $formatted, var_export($value, true));
-
         if (! $fits) {
-            throw new InvalidSearchDefinition($problem.'.');
+            throw new InvalidSearchDefinition($this->cannotHold($path, $condition, $formatted, $value));
         }
 
-        $text = is_bool($value) ? ($value ? 'true' : 'false') : (string) $value;
+        return is_bool($value) ? ($value ? 'true' : 'false') : (string) $value;
+    }
+
+    private function cannotHold(string $path, StepCondition $condition, string $formatted, mixed $value): string
+    {
+        return sprintf('The field "%s" restricts "%s" by the column "%s" (%s) with the value %s, which that column cannot hold.', $path, $condition->relation, $condition->column, $formatted, var_export($value, true));
+    }
+
+    /**
+     * The text form of the values in the type of the column, as PostgreSQL itself writes it, read in a fixed
+     * environment (UTC, ISO dates, ISO 8601 intervals) so that it means the same in every session that parses it
+     * again. One query per condition; a value the column cannot hold refuses the definition.
+     *
+     * @param  list<string>  $texts
+     * @return list<string>
+     */
+    private function castedTexts(string $path, StepCondition $condition, string $formatted, array $texts, Model $model): array
+    {
+        $cast = $this->tryCast($model, $formatted, $texts);
+
+        if ($cast !== null) {
+            return $cast;
+        }
+
+        // Name the value that does not fit.
+        foreach ($texts as $index => $text) {
+            if ($this->tryCast($model, $formatted, [$text]) === null) {
+                throw new InvalidSearchDefinition($this->cannotHold($path, $condition, $formatted, $condition->values[$index] ?? $text));
+            }
+        }
+
+        throw new InvalidSearchDefinition($this->cannotHold($path, $condition, $formatted, implode(', ', $texts)));
+    }
+
+    /**
+     * @param  list<string>  $texts
+     * @return list<string>|null Null when PostgreSQL refuses one of the values.
+     */
+    private function tryCast(Model $model, string $formatted, array $texts): ?array
+    {
         $connection = $model->getConnection();
+        $select = implode(', ', array_map(static fn (int $index): string => sprintf('CAST(?::text AS %s)::text AS "v%d"', $formatted, $index), array_keys($texts)));
+
+        // Always rolled back (to a savepoint inside the caller's transaction): a failed cast must not poison it, and
+        // the settings must not outlive the check.
+        $connection->beginTransaction();
 
         try {
-            // Inside a transaction of the caller a failed cast must not poison it: the closure runs in a savepoint.
-            $row = $connection->transaction(static fn (): ?object => $connection->selectOne(sprintf('SELECT CAST(?::text AS %s)::text AS "value"', $formatted), [$text]));
-        } catch (QueryException) {
-            throw new InvalidSearchDefinition($problem.'.');
-        }
+            $connection->statement("SET LOCAL TimeZone = 'UTC'");
+            $connection->statement("SET LOCAL DateStyle = 'ISO, YMD'");
+            $connection->statement("SET LOCAL IntervalStyle = 'iso_8601'");
 
-        return (string) ($row->value ?? $text);
+            return array_values(array_map(strval(...), (array) $connection->selectOne('SELECT '.$select, $texts)));
+        } catch (QueryException) {
+            return null;
+        } finally {
+            $connection->rollBack();
+        }
     }
 
     /**

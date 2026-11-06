@@ -82,6 +82,9 @@ return new class extends Migration
             $table->integer('level')->nullable();
             $table->boolean('flag')->nullable();
             $table->double('score')->nullable();
+            $table->timestampTz('at', 6)->nullable();
+            $table->date('day')->nullable();
+            $table->rawColumn('amount', 'numeric')->nullable();
             $table->index('order_id');
         });
 

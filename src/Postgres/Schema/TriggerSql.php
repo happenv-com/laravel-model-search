@@ -230,8 +230,10 @@ final readonly class TriggerSql
         }
 
         foreach ($entry->conditions as $step) {
-            $column = sprintf('%s.%s::text', $record, Sql::ident($step->column));
-            $values = array_map(static fn (bool|float|int|string $value): string => self::literal((string) $value), $step->values);
+            // Typed for a built-in type (its operators live in pg_catalog, which the fixed search_path keeps), as text
+            // for any other, whose operator may live outside the search_path.
+            $column = sprintf('%s.%s%s', $record, Sql::ident($step->column), $step->typedAs === null ? '::text' : '');
+            $values = array_map(static fn (bool|float|int|string $value): string => $step->typedAs === null ? self::literal((string) $value) : sprintf('CAST(%s AS %s)', self::literal((string) $value), $step->typedAs), $step->values);
             $condition .= count($values) === 1 ? sprintf(' AND %s = %s', $column, $values[0]) : sprintf(' AND %s IN (%s)', $column, implode(', ', $values));
         }
 

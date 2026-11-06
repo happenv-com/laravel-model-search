@@ -79,4 +79,20 @@ final class ColumnTypes
 
         return $this->formatted[$model->getConnection()->getName().'|'.$table][$column];
     }
+
+    /**
+     * Whether the type of a column is built into PostgreSQL (lives in pg_catalog, so its operators are always found,
+     * whatever the search path), as opposed to an extension type, an enum or a domain.
+     *
+     * @param  string  $quotedTable  The table as it is written in SQL.
+     */
+    public function isBuiltIn(Model $model, string $quotedTable, string $column): bool
+    {
+        $row = $model->getConnection()->selectOne(
+            'SELECT n."nspname" AS "schema" FROM "pg_catalog"."pg_attribute" a JOIN "pg_catalog"."pg_type" t ON t."oid" = a."atttypid" JOIN "pg_catalog"."pg_namespace" n ON n."oid" = t."typnamespace" WHERE a."attrelid" = ?::regclass AND a."attname" = ?',
+            [$quotedTable, $column],
+        );
+
+        return ($row->schema ?? null) === 'pg_catalog';
+    }
 }

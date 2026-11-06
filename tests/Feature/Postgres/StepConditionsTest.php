@@ -215,7 +215,7 @@ describe('postgres driver', function (): void {
 
         $sql = collect(new SchemaSync($registry)->plan()->triggers)->map(static fn ($trigger): string => $trigger->functionBody)->implode("\n");
 
-        expect($sql)->toContain('"kind"::text IN (\'o\'\'k\', \'order\')');
+        expect($sql)->toContain('"kind" IN (CAST(\'o\'\'k\' AS text), CAST(\'order\' AS text))');
     });
 });
 
@@ -433,6 +433,58 @@ describe('values and column types', function (): void {
         $reversed = $fingerprint(scProbeField()->where('probeRows', 'level', [2, 1]));
 
         expect($a)->toBe($b)->and($list)->toBe($reversed)->and($list)->not->toBe($a);
+    });
+});
+
+describe('types whose text depends on the session', function (): void {
+    it('compares a timestamp with time zone as a point in time, whatever the time zone of the writer', function (): void {
+        DB::statement("SET TIME ZONE 'UTC'");
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'at', '2026-01-01 00:00:00+00')]);
+        $id = scOrder('SIG-A');
+        DB::statement("SET TIME ZONE 'Europe/Warsaw'");
+        DB::table(TableNames::forConnection()->changes())->delete();
+
+        $row = scProbe($id, 'PR-AT', ['at' => '2026-01-01 01:00:00+01']);
+        scProbe($id, 'PR-LATER', ['at' => '2026-01-01 01:00:00+00']);
+        expect(DB::table(TableNames::forConnection()->changes())->pluck('node_id')->all())->toBe([$id]);
+
+        msIndex();
+        expect(scFind('PR-AT'))->toBe(['SIG-A'])->and(scFind('PR-LATER'))->toBe([]);
+
+        DB::table('probe_rows')->where('id', $row)->update(['at' => '2026-01-01 03:00:00+01']);
+        msIndex();
+        expect(scFind('PR-AT'))->toBe([]);
+    });
+
+    it('compares a date whatever the DateStyle of the writer', function (): void {
+        DB::statement("SET datestyle = 'ISO, MDY'");
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'day', '2026-01-02')]);
+        $id = scOrder('SIG-A');
+        DB::statement("SET datestyle = 'German, DMY'");
+
+        scProbe($id, 'PR-DAY', ['day' => '02.01.2026']);
+        scProbe($id, 'PR-OTHER', ['day' => '01.02.2026']);
+        msIndex();
+
+        expect(scFind('PR-DAY'))->toBe(['SIG-A'])->and(scFind('PR-OTHER'))->toBe([]);
+    });
+
+    it('matches an unconstrained numeric whatever scale it was written with', function (): void {
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'amount', 1.5)]);
+        $id = scOrder('SIG-A');
+        scProbe($id, 'PR-SHORT', ['amount' => '1.5']);
+        scProbe($id, 'PR-LONG', ['amount' => '1.50']);
+        scProbe($id, 'PR-OTHER', ['amount' => '1.6']);
+        msIndex();
+
+        expect(scFind('PR-SHORT'))->toBe(['SIG-A'])->and(scFind('PR-LONG'))->toBe(['SIG-A'])->and(scFind('PR-OTHER'))->toBe([]);
+    });
+
+    it('refuses money, whose text depends on lc_monetary', function (): void {
+        DB::statement('ALTER TABLE probe_rows ADD COLUMN cash money');
+
+        expect(static fn () => new PathCompiler()->compile(Order::class, 'probeRows.label', conditions: scProbeField()->where('probeRows', 'cash', '1.00')->toCompiled(false)->conditions))
+            ->toThrow(InvalidSearchDefinition::class, 'money');
     });
 });
 

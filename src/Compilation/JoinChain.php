@@ -55,11 +55,13 @@ final class JoinChain
 
             if ($restricted) {
                 foreach ($step->conditions as $condition) {
-                    // Compared as text, like the triggers do: the values are the text form of the column's type.
-                    $column = self::column($alias, $condition->column).'::text';
+                    // The same comparison the triggers make: typed for a built-in type, as text for any other.
+                    $column = self::column($alias, $condition->column);
+                    $placeholder = $condition->typedAs === null ? '?' : sprintf('CAST(? AS %s)', $condition->typedAs);
+                    $column .= $condition->typedAs === null ? '::text' : '';
                     $on .= count($condition->values) === 1
-                        ? sprintf(' AND %s = ?', $column)
-                        : sprintf(' AND %s IN (%s)', $column, implode(', ', array_fill(0, count($condition->values), '?')));
+                        ? sprintf(' AND %s = %s', $column, $placeholder)
+                        : sprintf(' AND %s IN (%s)', $column, implode(', ', array_fill(0, count($condition->values), $placeholder)));
                     array_push($bindings, ...$condition->values);
                 }
             }

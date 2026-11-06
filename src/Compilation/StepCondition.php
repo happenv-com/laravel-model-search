@@ -24,6 +24,7 @@ final readonly class StepCondition
         public string $relation,
         public string $column,
         public array $values,
+        public ?string $typedAs = null,
     ) {}
 
     /**
@@ -69,20 +70,22 @@ final readonly class StepCondition
      * sorted, so two spellings of one condition are one condition.
      *
      * @param  list<string>  $texts
+     * @param  string|null  $typedAs  The type of the column when it is compared typed (`column = CAST('text' AS type)`),
+     *                                null when it is compared as text (`column::text = 'text'`).
      */
-    public function withTexts(array $texts): self
+    public function withTexts(array $texts, ?string $typedAs): self
     {
         $texts = array_values(array_unique($texts));
         sort($texts);
 
-        return new self($this->relation, $this->column, $texts);
+        return new self($this->relation, $this->column, $texts, $typedAs);
     }
 
     /**
-     * @return array{relation: string, column: string, values: list<bool|float|int|string>}
+     * @return array{relation: string, column: string, values: list<bool|float|int|string>, type: string|null}
      */
     public function toArray(): array
     {
-        return ['relation' => $this->relation, 'column' => $this->column, 'values' => $this->values];
+        return ['relation' => $this->relation, 'column' => $this->column, 'values' => $this->values, 'type' => $this->typedAs];
     }
 }
