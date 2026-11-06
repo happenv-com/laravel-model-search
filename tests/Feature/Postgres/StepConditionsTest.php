@@ -480,6 +480,51 @@ describe('types whose text depends on the session', function (): void {
         expect(scFind('PR-SHORT'))->toBe(['SIG-A'])->and(scFind('PR-LONG'))->toBe(['SIG-A'])->and(scFind('PR-OTHER'))->toBe([]);
     });
 
+    it('follows a domain to its base type: a domain over timestamptz is a point in time', function (): void {
+        DB::statement('CREATE DOMAIN probe_instant AS timestamptz');
+        DB::statement('ALTER TABLE probe_rows ADD COLUMN moment probe_instant');
+        DB::statement("SET TIME ZONE 'UTC'");
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'moment', '2026-01-01 00:00:00+00')]);
+        $id = scOrder('SIG-A');
+        DB::statement("SET TIME ZONE 'Europe/Warsaw'");
+        DB::table(TableNames::forConnection()->changes())->delete();
+
+        scProbe($id, 'PR-MOMENT', ['moment' => '2026-01-01 01:00:00+01']);
+        expect(DB::table(TableNames::forConnection()->changes())->pluck('node_id')->all())->toBe([$id]);
+
+        msIndex();
+        expect(scFind('PR-MOMENT'))->toBe(['SIG-A']);
+    });
+
+    it('follows a domain to its base type: a domain over numeric takes a float and ignores the scale', function (): void {
+        DB::statement('CREATE DOMAIN probe_money AS numeric');
+        DB::statement('ALTER TABLE probe_rows ADD COLUMN price probe_money');
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'price', 1.5)]);
+        $id = scOrder('SIG-A');
+        scProbe($id, 'PR-SHORT', ['price' => '1.5']);
+        scProbe($id, 'PR-LONG', ['price' => '1.50']);
+        scProbe($id, 'PR-OTHER', ['price' => '1.6']);
+        msIndex();
+
+        expect(scFind('PR-SHORT'))->toBe(['SIG-A'])->and(scFind('PR-LONG'))->toBe(['SIG-A'])->and(scFind('PR-OTHER'))->toBe([]);
+    });
+
+    it('refuses a column whose type has no btree equality', function (string $type, string $value): void {
+        DB::statement('ALTER TABLE probe_rows ADD COLUMN odd '.$type);
+
+        expect(static fn () => new PathCompiler()->compile(Order::class, 'probeRows.label', conditions: scProbeField()->where('probeRows', 'odd', $value)->toCompiled(false)->conditions))
+            ->toThrow(InvalidSearchDefinition::class, 'equality');
+    })->with([
+        'json' => ['json', '{}'],
+        'xml' => ['xml', '<a/>'],
+        'point' => ['point', '(1,2)'],
+    ]);
+
+    it('refuses a timestamp with time zone value that has no offset', function (): void {
+        expect(static fn () => new PathCompiler()->compile(Order::class, 'probeRows.label', conditions: scProbeField()->where('probeRows', 'at', '2026-01-01 00:00:00')->toCompiled(false)->conditions))
+            ->toThrow(InvalidSearchDefinition::class, 'offset');
+    });
+
     it('refuses money, whose text depends on lc_monetary', function (): void {
         DB::statement('ALTER TABLE probe_rows ADD COLUMN cash money');
 

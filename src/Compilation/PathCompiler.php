@@ -390,14 +390,21 @@ final class PathCompiler
             }
 
             try {
-                $type = $types->raw($model, $table, $condition->column);
-                $formatted = $types->formatted($model, $table, $condition->column);
+                $types->raw($model, $table, $condition->column);
+                $resolved = $types->resolved($model, Sql::table($model), $condition->column);
             } catch (InvalidFieldPath) {
                 throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the column "%s", but the table "%s" that relation reaches has no such column.', $path, $condition->relation, $condition->column, $table));
             }
 
+            $type = $resolved['name'];
+            $formatted = $resolved['formatted'];
+
             if ($type === 'money') {
                 throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the money column "%s", but the text of money depends on lc_monetary, so it cannot be compared reliably; compare a numeric column instead.', $path, $condition->relation, $condition->column));
+            }
+
+            if (! $resolved['comparable']) {
+                throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the column "%s" (%s), but that type has no equality operator (no default btree operator class), so it cannot be compared.', $path, $condition->relation, $condition->column, $formatted));
             }
 
             $texts = [];
@@ -408,7 +415,7 @@ final class PathCompiler
 
             $checked[] = $condition->withTexts(
                 $this->castedTexts($path, $condition, $formatted, $texts, $model),
-                $types->isBuiltIn($model, Sql::table($model), $condition->column) ? $formatted : null,
+                $resolved['builtIn'] ? $formatted : null,
             );
         }
 
@@ -428,6 +435,11 @@ final class PathCompiler
 
         if (! $fits) {
             throw new InvalidSearchDefinition($this->cannotHold($path, $condition, $formatted, $value));
+        }
+
+        // Without an offset the instant would depend on the time zone of whoever reads the text: refuse, do not guess.
+        if (in_array($type, ['timestamptz', 'timetz'], true) && preg_match('/(?:z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)\s*$/i', (string) $value) !== 1) {
+            throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the column "%s" (%s) with the value %s, which has no offset (such as +00:00 or Z); the instant would depend on a time zone.', $path, $condition->relation, $condition->column, $formatted, var_export($value, true)));
         }
 
         return is_bool($value) ? ($value ? 'true' : 'false') : (string) $value;
