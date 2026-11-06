@@ -437,8 +437,9 @@ final class PathCompiler
             throw new InvalidSearchDefinition($this->cannotHold($path, $condition, $formatted, $value));
         }
 
-        // Without an offset the instant would depend on the time zone of whoever reads the text: refuse, do not guess.
-        if (in_array($type, ['timestamptz', 'timetz'], true) && preg_match('/(?:z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)\s*$/i', (string) $value) !== 1) {
+        // Without an offset after the time the instant would depend on the time zone of whoever reads the text: refuse, do not guess.
+        // The time is required, so the day of a bare date ('2026-01-01') is not read as an offset.
+        if (in_array($type, ['timestamptz', 'timetz'], true) && preg_match('/\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)\s*$/i', (string) $value) !== 1) {
             throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the column "%s" (%s) with the value %s, which has no offset (such as +00:00 or Z); the instant would depend on a time zone.', $path, $condition->relation, $condition->column, $formatted, var_export($value, true)));
         }
 

@@ -520,10 +520,13 @@ describe('types whose text depends on the session', function (): void {
         'point' => ['point', '(1,2)'],
     ]);
 
-    it('refuses a timestamp with time zone value that has no offset', function (): void {
-        expect(static fn () => new PathCompiler()->compile(Order::class, 'probeRows.label', conditions: scProbeField()->where('probeRows', 'at', '2026-01-01 00:00:00')->toCompiled(false)->conditions))
+    it('refuses a timestamp with time zone value that has no offset', function (string $value): void {
+        expect(static fn () => new PathCompiler()->compile(Order::class, 'probeRows.label', conditions: scProbeField()->where('probeRows', 'at', $value)->toCompiled(false)->conditions))
             ->toThrow(InvalidSearchDefinition::class, 'offset');
-    });
+    })->with([
+        'date and time' => ['2026-01-01 00:00:00'],
+        'date only, whose day reads like an offset' => ['2026-01-01'],
+    ]);
 
     it('refuses money, whose text depends on lc_monetary', function (): void {
         DB::statement('ALTER TABLE probe_rows ADD COLUMN cash money');
