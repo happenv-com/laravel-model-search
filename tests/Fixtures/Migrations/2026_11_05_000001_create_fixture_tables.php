@@ -75,6 +75,16 @@ return new class extends Migration
             $table->index('order_id');
         });
 
+        Schema::create('probe_rows', function (Blueprint $table): void {
+            $table->uuid('id')->primary();
+            $table->uuid('order_id')->nullable();
+            $table->text('label')->nullable();
+            $table->integer('level')->nullable();
+            $table->boolean('flag')->nullable();
+            $table->double('score')->nullable();
+            $table->index('order_id');
+        });
+
         Schema::create('ulid_records', function (Blueprint $table): void {
             $table->ulid('id')->primary();
             $table->text('code')->nullable();

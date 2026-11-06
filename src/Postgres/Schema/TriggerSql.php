@@ -230,8 +230,8 @@ final readonly class TriggerSql
         }
 
         foreach ($entry->conditions as $step) {
-            $column = sprintf('%s.%s', $record, Sql::ident($step->column));
-            $values = array_map(static fn (bool|float|int|string $value): string => self::literal(is_bool($value) ? ($value ? 'true' : 'false') : (string) $value), $step->values);
+            $column = sprintf('%s.%s::text', $record, Sql::ident($step->column));
+            $values = array_map(static fn (bool|float|int|string $value): string => self::literal((string) $value), $step->values);
             $condition .= count($values) === 1 ? sprintf(' AND %s = %s', $column, $values[0]) : sprintf(' AND %s IN (%s)', $column, implode(', ', $values));
         }
 

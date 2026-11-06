@@ -17,8 +17,10 @@ use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
+use Illuminate\Database\QueryException;
 use ReflectionMethod;
 use ReflectionNamedType;
+use ReflectionProperty;
 
 /**
  * Turns a dotted field path (`billingAddress.phone`) into SQL over the source tables, using the
@@ -275,6 +277,8 @@ final class PathCompiler
         $query = $relation->getQuery()->getQuery();
         $joins = $query->joins ?? [];
 
+        $pivotTable = $relation instanceof BelongsToMany ? $relation->getTable() : null;
+
         // A pivot or through relation joins its intermediate table by itself; any other join is the relation's own.
         $intermediate = match (true) {
             $relation instanceof BelongsToMany => $relation->getTable(),
@@ -297,21 +301,42 @@ final class PathCompiler
             // latestOfMany() and ofMany() pick one row per parent; their join is only added once the relation is queried.
             'one-of-many' => method_exists($relation, 'isOneOfMany') && $relation->isOneOfMany(),
             'before-query callback' => $query->beforeQueryCallbacks !== [],
+            'after-query callback' => $this->builderProperty($relation, 'afterQueryCallbacks') !== [],
+            'global scope added to the relation' => array_diff(array_keys($this->builderProperty($relation, 'scopes')), array_keys($relation->getRelated()->getGlobalScopes()), $relation instanceof HasOneOrManyThrough ? ['SoftDeletableHasManyThrough'] : []) !== [],
+            'removed global scope' => $relation->getQuery()->removedScopes() !== [],
         ]));
 
         if ($found === []) {
             return;
         }
 
+        $pivot = $pivotTable !== null && array_any($query->wheres, static fn (array $where): bool => is_string($where['column'] ?? null) && str_starts_with($where['column'], $pivotTable.'.'));
+
         throw new InvalidSearchDefinition(sprintf(
-            '%s::%s() carries query conditions (%s), but the field path "%s" is compiled from the relation\'s keys only, so the index would hold rows the relation never returns. Use a relation without query conditions on the path and declare the condition on the field: SearchField::key(\'%s\')->where(\'%s\', \'<column>\', <value>).',
+            '%s::%s() carries query conditions (%s), but the field path "%s" is compiled from the relation\'s keys only, so the index would hold rows the relation never returns. Use a relation without query conditions on the path and declare the condition on the field: SearchField::key(\'%s\')->where(\'%s\', \'<column>\', <value>).%s',
             $model::class,
             $name,
             implode(', ', $found),
             $path,
             $path,
             $name,
+            $pivot ? ' Conditions on a pivot table are not supported, neither on the relation nor on the field.' : '',
         ));
+    }
+
+    /**
+     * A protected property of the relation's Eloquent builder that has no accessor (the scopes it carries, the
+     * callbacks it runs after the query).
+     *
+     * @param  Relation<*, *, *>  $relation
+     * @return array<array-key, mixed>
+     */
+    private function builderProperty(Relation $relation, string $property): array
+    {
+        $builder = $relation->getQuery();
+        $value = new ReflectionProperty($builder, $property)->getValue($builder);
+
+        return is_array($value) ? $value : [];
     }
 
     /**
@@ -348,24 +373,69 @@ final class PathCompiler
     }
 
     /**
+     * Checks every value against the type of its column and replaces it with its text form in that type, which is
+     * what the projection and the triggers both compare (`column::text = 'value'`), so they always agree. PostgreSQL
+     * does the conversion, once, here: a value the column cannot hold is refused instead of breaking every write.
+     *
      * @param  list<StepCondition>  $conditions
      * @return list<StepCondition>
      */
     private function checkedConditions(string $path, ?Model $model, string $table, array $conditions, ColumnTypes $types): array
     {
+        $checked = [];
+
         foreach ($conditions as $condition) {
             if (! $model instanceof Model) {
                 throw new InvalidSearchDefinition(sprintf('The condition on "%s.%s" of the field "%s" cannot be applied: the step has no model.', $condition->relation, $condition->column, $path));
             }
 
             try {
-                $types->raw($model, $table, $condition->column);
+                $type = $types->raw($model, $table, $condition->column);
+                $formatted = $types->formatted($model, $table, $condition->column);
             } catch (InvalidFieldPath) {
                 throw new InvalidSearchDefinition(sprintf('The field "%s" restricts "%s" by the column "%s", but the table "%s" that relation reaches has no such column.', $path, $condition->relation, $condition->column, $table));
             }
+
+            $texts = [];
+
+            foreach ($condition->values as $value) {
+                $texts[] = $this->textOf($path, $condition, $type, $formatted, $value, $model);
+            }
+
+            $checked[] = $condition->withTexts($texts);
         }
 
-        return $conditions;
+        usort($checked, static fn (StepCondition $a, StepCondition $b): int => [$a->column, $a->values] <=> [$b->column, $b->values]);
+
+        return $checked;
+    }
+
+    private function textOf(string $path, StepCondition $condition, string $type, string $formatted, bool|float|int|string $value, Model $model): string
+    {
+        $fits = match (true) {
+            $type === 'bool' => is_bool($value),
+            in_array($type, ['int2', 'int4', 'int8', 'numeric', 'float4', 'float8'], true) => is_int($value) || is_float($value),
+            in_array($type, ['text', 'varchar', 'bpchar', 'name', 'citext'], true) => ! is_bool($value),
+            default => is_string($value),
+        };
+
+        $problem = sprintf('The field "%s" restricts "%s" by the column "%s" (%s) with the value %s, which that column cannot hold', $path, $condition->relation, $condition->column, $formatted, var_export($value, true));
+
+        if (! $fits) {
+            throw new InvalidSearchDefinition($problem.'.');
+        }
+
+        $text = is_bool($value) ? ($value ? 'true' : 'false') : (string) $value;
+        $connection = $model->getConnection();
+
+        try {
+            // Inside a transaction of the caller a failed cast must not poison it: the closure runs in a savepoint.
+            $row = $connection->transaction(static fn (): ?object => $connection->selectOne(sprintf('SELECT CAST(?::text AS %s)::text AS "value"', $formatted), [$text]));
+        } catch (QueryException) {
+            throw new InvalidSearchDefinition($problem.'.');
+        }
+
+        return (string) ($row->value ?? $text);
     }
 
     /**

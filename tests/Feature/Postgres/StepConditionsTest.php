@@ -215,7 +215,7 @@ describe('postgres driver', function (): void {
 
         $sql = collect(new SchemaSync($registry)->plan()->triggers)->map(static fn ($trigger): string => $trigger->functionBody)->implode("\n");
 
-        expect($sql)->toContain('"kind" IN (\'order\', \'o\'\'k\')');
+        expect($sql)->toContain('"kind"::text IN (\'o\'\'k\', \'order\')');
     });
 });
 
@@ -295,5 +295,163 @@ describe('database driver', function (): void {
 
         DB::table('market_orders')->where('id', $row)->update(['status' => 'cancelled']);
         expect(scFind('MO-1'))->toBe([]);
+    });
+
+    it('reads enum and list values', function (): void {
+        scUse([SearchField::key('signature'), scField()->where('marketOrder', 'kind', [MarketOrderKind::Order, 'credit'])], 'database');
+        $id = scOrder('SIG-A');
+        scMarketOrder($id, 'MO-ORDER', ['kind' => 'order']);
+        scMarketOrder($id, 'MO-CREDIT', ['kind' => 'credit']);
+        scMarketOrder($id, 'MO-INVOICE', ['kind' => 'invoice']);
+
+        expect(scFind('MO-ORDER'))->toBe(['SIG-A'])->and(scFind('MO-CREDIT'))->toBe(['SIG-A'])->and(scFind('MO-INVOICE'))->toBe([]);
+
+        scUse([SearchField::key('signature'), scField()->where('marketOrder', 'kind', MarketOrderKind::Invoice)], 'database');
+        expect(scFind('MO-INVOICE'))->toBe(['SIG-A'])->and(scFind('MO-ORDER'))->toBe([]);
+    });
+});
+
+/**
+ * @param  array<string, mixed>  $attributes
+ */
+function scProbe(string $order, string $label, array $attributes = []): string
+{
+    $id = (string) Str::uuid();
+    DB::table('probe_rows')->insert(['id' => $id, 'order_id' => $order, 'label' => $label, ...$attributes]);
+
+    return $id;
+}
+
+function scProbeField(): SearchField
+{
+    return SearchField::key('probeRows.label')->kind('probe');
+}
+
+describe('values and column types', function (): void {
+    it('refuses a value that does not fit the type of the column', function (string $column, mixed $value): void {
+        $compile = static fn () => new PathCompiler()->compile(Order::class, 'probeRows.label', conditions: scProbeField()->where('probeRows', $column, $value)->toCompiled(false)->conditions);
+
+        expect($compile)->toThrow(InvalidSearchDefinition::class, 'probeRows');
+    })->with([
+        'a bool on an integer column' => ['level', true],
+        'a word on an integer column' => ['level', 'high'],
+        'a number on a boolean column' => ['flag', 1],
+        'a word on a boolean column' => ['flag', 'yes'],
+        'a word on a float column' => ['score', 'high'],
+        'a bool on a text column' => ['label', true],
+        'a bad value inside a list' => ['level', [1, 'high']],
+    ]);
+
+    it('leaves the transaction of the caller usable after refusing a value', function (): void {
+        try {
+            new PathCompiler()->compile(Order::class, 'probeRows.label', conditions: scProbeField()->where('probeRows', 'level', 'high')->toCompiled(false)->conditions);
+        } catch (InvalidSearchDefinition) {
+        }
+
+        expect(DB::selectOne('select 1 as one')->one)->toBe(1);
+    });
+
+    it('matches a boolean, an integer, a float and a list of integers the same way in the projection and the triggers', function (): void {
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'flag', true)]);
+        $id = scOrder('SIG-A');
+        $on = scProbe($id, 'PR-ON', ['flag' => true]);
+        scProbe($id, 'PR-OFF', ['flag' => false]);
+        msIndex();
+        expect(scFind('PR-ON'))->toBe(['SIG-A'])->and(scFind('PR-OFF'))->toBe([]);
+        DB::table('probe_rows')->where('id', $on)->update(['flag' => false]);
+        msIndex();
+        expect(scFind('PR-ON'))->toBe([]);
+
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'level', [2, 3])]);
+        $level = scProbe($id, 'PR-LEVEL', ['level' => 2]);
+        scProbe($id, 'PR-OTHER', ['level' => 1]);
+        msIndex();
+        expect(scFind('PR-LEVEL'))->toBe(['SIG-A'])->and(scFind('PR-OTHER'))->toBe([]);
+        DB::table('probe_rows')->where('id', $level)->update(['level' => 1]);
+        msIndex();
+        expect(scFind('PR-LEVEL'))->toBe([]);
+
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'score', 1.5)]);
+        scProbe($id, 'PR-SCORE', ['score' => 1.5]);
+        scProbe($id, 'PR-NOSCORE', ['score' => 2.5]);
+        msIndex();
+        expect(scFind('PR-SCORE'))->toBe(['SIG-A'])->and(scFind('PR-NOSCORE'))->toBe([]);
+    });
+
+    it('does not break writes to the watched table', function (): void {
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'level', 2)]);
+        $id = scOrder('SIG-A');
+
+        expect(static fn () => scProbe($id, 'PR-1', ['level' => 7]))->not->toThrow(Throwable::class);
+    });
+
+    it('compares text exactly, with the case, in the projection and in the triggers', function (): void {
+        DB::statement('CREATE EXTENSION IF NOT EXISTS citext');
+        DB::statement('ALTER TABLE probe_rows ADD COLUMN ci citext');
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'ci', 'Alpha')]);
+        $id = scOrder('SIG-A');
+        $row = scProbe($id, 'PR-UPPER', ['ci' => 'Alpha']);
+        scProbe($id, 'PR-LOWER', ['ci' => 'alpha']);
+        msIndex();
+        expect(scFind('PR-UPPER'))->toBe(['SIG-A'])->and(scFind('PR-LOWER'))->toBe([]);
+
+        DB::table('probe_rows')->where('id', $row)->update(['ci' => 'alpha']);
+        msIndex();
+        expect(scFind('PR-UPPER'))->toBe([]);
+    });
+
+    it('checks the labels of a native enum column and indexes by them', function (): void {
+        DB::statement("CREATE TYPE probe_mood AS ENUM ('happy', 'sad')");
+        DB::statement('ALTER TABLE probe_rows ADD COLUMN mood probe_mood');
+        $compile = static fn () => new PathCompiler()->compile(Order::class, 'probeRows.label', conditions: scProbeField()->where('probeRows', 'mood', 'hapy')->toCompiled(false)->conditions);
+        expect($compile)->toThrow(InvalidSearchDefinition::class);
+
+        scUse([SearchField::key('signature'), scProbeField()->where('probeRows', 'mood', 'happy')]);
+        $id = scOrder('SIG-A');
+        scProbe($id, 'PR-HAPPY', ['mood' => 'happy']);
+        scProbe($id, 'PR-SAD', ['mood' => 'sad']);
+        msIndex();
+        expect(scFind('PR-HAPPY'))->toBe(['SIG-A'])->and(scFind('PR-SAD'))->toBe([]);
+    });
+
+    it('refuses a value that is not finite', function (float $value): void {
+        expect(static fn () => scProbeField()->where('probeRows', 'score', $value))->toThrow(InvalidSearchDefinition::class);
+    })->with([NAN, INF, -INF]);
+
+    it('reads the same definition whatever the order of the conditions', function (): void {
+        $fingerprint = static function (SearchField $field): string {
+            ConfigurableOrderSearch::$fields = [$field];
+            $registry = new ModelSearchRegistry;
+            $registry->register(ConfigurableOrderSearch::class);
+
+            return Fingerprint::of($registry->for(Order::class));
+        };
+
+        $a = $fingerprint(scProbeField()->where('probeRows', 'level', 1)->where('probeRows', 'flag', true));
+        $b = $fingerprint(scProbeField()->where('probeRows', 'flag', true)->where('probeRows', 'level', 1));
+        $list = $fingerprint(scProbeField()->where('probeRows', 'level', [1, 2]));
+        $reversed = $fingerprint(scProbeField()->where('probeRows', 'level', [2, 1]));
+
+        expect($a)->toBe($b)->and($list)->toBe($reversed)->and($list)->not->toBe($a);
+    });
+});
+
+describe('moving rows', function (): void {
+    it('converges when a related row moves to another parent while its condition flips', function (): void {
+        scUse([SearchField::key('signature'), scField()->where('marketOrder', 'status', 'created')]);
+        $first = scOrder('SIG-A');
+        $second = scOrder('SIG-B');
+        $row = scMarketOrder($first, 'MO-1', ['status' => 'created']);
+        msIndex();
+        expect(scFind('MO-1'))->toBe(['SIG-A']);
+
+        DB::table('market_orders')->where('id', $row)->update(['order_id' => $second, 'status' => 'cancelled']);
+        msIndex();
+        expect(scFind('MO-1'))->toBe([]);
+
+        DB::table('market_orders')->where('id', $row)->update(['order_id' => $first, 'status' => 'created']);
+        DB::table('market_orders')->where('id', $row)->update(['order_id' => $second]);
+        msIndex();
+        expect(scFind('MO-1'))->toBe(['SIG-B']);
     });
 });

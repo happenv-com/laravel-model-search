@@ -17,7 +17,8 @@ use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 final readonly class StepCondition
 {
     /**
-     * @param  list<bool|float|int|string>  $values  At least one; one value means equality, several mean "any of".
+     * @param  list<bool|float|int|string>  $values  At least one; one value means equality, several mean "any of". Once
+     *                                               compiled they are the text form of the value in the column's type.
      */
     private function __construct(
         public string $relation,
@@ -53,10 +54,28 @@ final readonly class StepCondition
                 throw new InvalidSearchDefinition(sprintf('The condition on "%s.%s" accepts scalars and backed enums (or a list of them), nothing else.', $relation, $column));
             }
 
+            if (is_float($item) && ! is_finite($item)) {
+                throw new InvalidSearchDefinition(sprintf('The condition on "%s.%s" has a value that is not a finite number.', $relation, $column));
+            }
+
             $values[] = $item;
         }
 
         return new self($relation, $column, $values);
+    }
+
+    /**
+     * The same condition with its values replaced by their text form in the type of the column, deduplicated and
+     * sorted, so two spellings of one condition are one condition.
+     *
+     * @param  list<string>  $texts
+     */
+    public function withTexts(array $texts): self
+    {
+        $texts = array_values(array_unique($texts));
+        sort($texts);
+
+        return new self($this->relation, $this->column, $texts);
     }
 
     /**

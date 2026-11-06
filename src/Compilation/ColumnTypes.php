@@ -18,6 +18,9 @@ final class ColumnTypes
     /** @var array<string, array<string, string>> */
     private array $tables = [];
 
+    /** @var array<string, array<string, string>> */
+    private array $formatted = [];
+
     /**
      * The type name to cast a bound array to (`uuid`, `int8`, `bpchar`, `text`, …).
      */
@@ -42,9 +45,11 @@ final class ColumnTypes
 
         if (! isset($this->tables[$key])) {
             $types = [];
+            $formatted = [];
 
             foreach ($connection->getSchemaBuilder()->getColumns($table) as $definition) {
                 $types[(string) $definition['name']] = (string) $definition['type_name'];
+                $formatted[(string) $definition['name']] = (string) $definition['type'];
             }
 
             if ($types === []) {
@@ -52,6 +57,7 @@ final class ColumnTypes
             }
 
             $this->tables[$key] = $types;
+            $this->formatted[$key] = $formatted;
         }
 
         $type = $this->tables[$key][$column] ?? null;
@@ -61,5 +67,16 @@ final class ColumnTypes
         }
 
         return $type;
+    }
+
+    /**
+     * The type of a column as PostgreSQL writes it (`integer`, `character varying(20)`, `public.citext`), schema
+     * qualified where the type lives outside the search path, so it can be used in a cast.
+     */
+    public function formatted(Model $model, string $table, string $column): string
+    {
+        $this->raw($model, $table, $column);
+
+        return $this->formatted[$model->getConnection()->getName().'|'.$table][$column];
     }
 }

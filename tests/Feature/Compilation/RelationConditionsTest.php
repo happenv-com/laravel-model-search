@@ -38,6 +38,21 @@ describe('a relation that carries query conditions', function (): void {
         'a where on a morph relation' => ['whereNotes', 'body'],
     ]);
 
+    it('is refused when the conditions are held by the Eloquent builder', function (string $relation): void {
+        expect(static fn () => new PathCompiler()->compile(Order::class, $relation.'.reference'))
+            ->toThrow(InvalidSearchDefinition::class, Order::class.'::'.$relation.'()');
+    })->with([
+        'a global scope added to the relation' => ['scopedParcels'],
+        'an after query callback' => ['afterQueryParcels'],
+        'a removed global scope (withTrashed)' => ['trashedParcels'],
+        'a removed global scope by name' => ['unscopedParcels'],
+    ]);
+
+    it('says that conditions on a pivot table are not supported', function (): void {
+        expect(static fn () => new PathCompiler()->compile(Order::class, 'wherePivotTags.name'))
+            ->toThrow(InvalidSearchDefinition::class, 'pivot table are not supported');
+    });
+
     it('is refused in the middle of a longer path too', function (): void {
         expect(static fn () => new PathCompiler()->compile(Order::class, 'whereMarketOrder.order.signature'))
             ->toThrow(InvalidSearchDefinition::class, 'whereMarketOrder()');

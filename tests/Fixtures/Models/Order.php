@@ -300,4 +300,44 @@ class Order extends Model
     {
         return $this->morphMany(Note::class, 'noteable')->where('body', 'pinned');
     }
+
+    /**
+     * @return HasMany<ProbeRow, $this>
+     */
+    public function probeRows(): HasMany
+    {
+        return $this->hasMany(ProbeRow::class, 'order_id');
+    }
+
+    /**
+     * @return HasMany<Parcel, $this>
+     */
+    public function scopedParcels(): HasMany
+    {
+        return $this->hasMany(Parcel::class, 'order_id')->withGlobalScope('mine', static fn ($query) => $query->where('reference', 'x'));
+    }
+
+    /**
+     * @return HasMany<Parcel, $this>
+     */
+    public function afterQueryParcels(): HasMany
+    {
+        return $this->hasMany(Parcel::class, 'order_id')->afterQuery(static fn ($result) => $result);
+    }
+
+    /**
+     * @return HasMany<Parcel, $this>
+     */
+    public function trashedParcels(): HasMany
+    {
+        return $this->hasMany(Parcel::class, 'order_id')->withTrashed();
+    }
+
+    /**
+     * @return HasMany<Parcel, $this>
+     */
+    public function unscopedParcels(): HasMany
+    {
+        return $this->hasMany(Parcel::class, 'order_id')->withoutGlobalScope('nothing');
+    }
 }
