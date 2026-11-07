@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.3.1 - 2026-11-07
+
+- `SearchQuery::within()` accepts the builder of a concrete model (`Order::query()`, a custom builder class): the host and via builders are typed `Builder<covariant Model>`. Static analysis only; nothing changes at runtime.
+
 ## v0.3.0 - 2026-11-06
 
 - **Breaking:** a relation on a field path (or a `via` field) that carries query conditions of its own (a where, a join, a `limit`, `ofMany()`, a group, a union) is refused with an `InvalidSearchDefinition` naming the model, the relation and the path. The index was built from the relation's keys only, so those conditions were silently ignored and it held rows the relation never returns. Ordering is still accepted. Conditions held by the relation's Eloquent builder (added or removed scopes, `afterQuery()`) are refused too, and conditions on a pivot table are not supported. Use a relation without conditions and declare the condition on the field.
