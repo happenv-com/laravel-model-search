@@ -84,8 +84,8 @@ final class SearchQuery
      * A `via` field reaches a parent record only through the parent's own scope, given here by the
      * parent model class. Without one, that `via` field finds nothing.
      *
-     * @param  Builder<Model>  $host
-     * @param  array<class-string<Model>, Builder<Model>>  $via
+     * @param  Builder<covariant Model>  $host
+     * @param  array<class-string<Model>, Builder<covariant Model>>  $via
      */
     public function within(Builder $host, array $via = []): self
     {

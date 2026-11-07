@@ -29,12 +29,12 @@ final readonly class HostQuery
     public const string KEY_ALIAS = 'search_key';
 
     /**
-     * @param  Builder<Model>  $builder
+     * @param  Builder<covariant Model>  $builder
      */
     private function __construct(private Builder $builder) {}
 
     /**
-     * @param  Builder<Model>  $builder
+     * @param  Builder<covariant Model>  $builder
      */
     public static function from(Builder $builder): self
     {
