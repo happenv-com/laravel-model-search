@@ -44,7 +44,8 @@ function nktUuid(array $definitions): SearchIndexer
     $names = TableNames::forConnection();
 
     foreach ([[$names->entries(), 'subject_id'], [$names->keys(), 'subject_id'], [$names->failures(), 'subject_id'], [$names->changes(), 'node_id']] as [$table, $column]) {
-        DB::statement(sprintf('ALTER TABLE %1$s ALTER COLUMN "%2$s" TYPE uuid USING "%2$s"::uuid', $names->quoted($table), $column));
+        // The tables are empty: a typed NULL converts from any old type (there is no cast from bigint to uuid).
+        DB::statement(sprintf('ALTER TABLE %1$s ALTER COLUMN "%2$s" TYPE uuid USING NULL::uuid', $names->quoted($table), $column));
     }
 
     $registry = new ModelSearchRegistry;
