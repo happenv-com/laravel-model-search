@@ -8,6 +8,7 @@ use Happenv\ModelSearch\Definition\CompiledDefinition;
 use Happenv\ModelSearch\Drivers\Fragment;
 use Happenv\ModelSearch\Drivers\IdNarrowing;
 use Happenv\ModelSearch\Exceptions\SearchTooBroad;
+use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Happenv\ModelSearch\Query\SearchQuery;
 
 /**
@@ -52,10 +53,11 @@ final class ApplyIds
         // One row says whether the list is too broad (a branch at its cap, or a `via` path with more parents than its cap), the others are the keys.
         return [
             'sql' => sprintf(
-                'WITH u AS MATERIALIZED (SELECT x.subject_id, x.br, x.ptr FROM (%1$s) AS x) SELECT CAST(NULL AS text) AS subject_id, (SELECT count(*) FROM (SELECT br FROM u GROUP BY br HAVING count(*) > %2$d) AS g) AS broad, (SELECT count(*) FROM u WHERE ptr) AS parents UNION ALL (SELECT DISTINCT u.subject_id, 0, 0 FROM u WHERE u.subject_id IS NOT NULL LIMIT %3$d)',
+                'WITH u AS MATERIALIZED (SELECT x.subject_id, x.br, x.ptr FROM (%1$s) AS x) SELECT CAST(NULL AS %4$s) AS subject_id, (SELECT count(*) FROM (SELECT br FROM u GROUP BY br HAVING count(*) > %2$d) AS g) AS broad, (SELECT count(*) FROM u WHERE ptr) AS parents UNION ALL (SELECT DISTINCT u.subject_id, 0, 0 FROM u WHERE u.subject_id IS NOT NULL LIMIT %3$d)',
                 $union->sql,
                 $max,
                 $max + 1,
+                SubjectKey::type(),
             ),
             'bindings' => $union->bindings,
         ];

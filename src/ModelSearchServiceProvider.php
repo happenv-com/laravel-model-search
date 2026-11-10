@@ -38,7 +38,10 @@ final class ModelSearchServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+        // An application that ships its own copy of the migration (published or rewritten) turns this off.
+        if (config('model-search.run_migrations', true) === true) {
+            $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+        }
 
         Event::listen(MigrationsEnded::class, SyncAfterMigrations::class);
 
@@ -49,5 +52,9 @@ final class ModelSearchServiceProvider extends ServiceProvider
         $this->publishes([
             __DIR__.'/../config/model-search.php' => $this->app->configPath('model-search.php'),
         ], 'model-search-config');
+
+        $this->publishesMigrations([
+            __DIR__.'/../database/migrations' => $this->app->databasePath('migrations'),
+        ], 'model-search-migrations');
     }
 }

@@ -31,6 +31,9 @@ abstract class BaseTestCase extends Orchestra
             'search_path' => 'public',
             'sslmode' => 'prefer',
         ]);
+
+        // The fixtures mix key types (uuid orders, bigint customers), which only a text subject id holds.
+        $app['config']->set('model-search.subject_key_type', 'text');
     }
 
     protected function defineDatabaseMigrations(): void

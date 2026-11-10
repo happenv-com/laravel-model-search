@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
+use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
@@ -18,6 +19,12 @@ use Illuminate\Support\Facades\Schema;
  * is nullable and ids are unique per source table. The triggers write `changes.partition = NULL`;
  * the drain derives the partition from the root row.
  *
+ * Column types follow Laravel's defaults: `subject_id` takes the type named by `model-search.subject_key_type`
+ * (`bigint` like `id()`, `uuid`, or `text`), and the moments are `timestamp` without a time zone. They keep microseconds
+ * (precision 6): a rebuild is told apart from its restart by the moment it started, and two restarts within one second
+ * must not look the same. An application with other conventions (a `timestamptz` schema, its own prefix) turns
+ * `model-search.run_migrations` off and ships its own copy; the package's SQL works with either.
+ *
  * Privileges: the role that runs the sync owns these tables. The roles that write to the watched
  * tables need INSERT on the changes table (the triggers run as the invoker), and UPDATE on the
  * state table to TRUNCATE a watched table.
@@ -30,18 +37,18 @@ return new class extends Migration
 
         Schema::create($names->entries(), function (Blueprint $table): void {
             $table->text('subject_type');
-            $table->text('subject_id');
+            self::subjectId($table);
             $table->text('partition')->nullable();
             $table->smallInteger('stage');
             $table->text('names')->default('');
-            $table->timestampTz('sort_at', 6)->nullable();
-            $table->timestampTz('indexed_at', 6);
+            $table->timestamp('sort_at', 6)->nullable();
+            $table->timestamp('indexed_at', 6);
             $table->primary(['subject_type', 'subject_id']);
         });
 
         Schema::create($names->keys(), function (Blueprint $table): void {
             $table->text('subject_type');
-            $table->text('subject_id');
+            self::subjectId($table);
             $table->text('partition')->nullable();
             $table->text('kind');
             $table->text('key');
@@ -62,26 +69,26 @@ return new class extends Migration
             $table->text('node_type');
             $table->text('node_id');
             $table->text('partition')->nullable();
-            $table->timestampTz('changed_at', 6)->default(DB::raw('clock_timestamp()'));
+            $table->timestamp('changed_at', 6)->default(DB::raw('clock_timestamp()'));
         });
 
         Schema::create($names->state(), function (Blueprint $table): void {
             $table->text('subject_type')->primary();
             $table->text('definition_fingerprint');
             $table->bigInteger('definition_version');
-            $table->timestampTz('installed_at', 6);
-            $table->timestampTz('ready_at', 6)->nullable();
+            $table->timestamp('installed_at', 6);
+            $table->timestamp('ready_at', 6)->nullable();
             $table->text('rebuild_cursor')->nullable();
-            $table->timestampTz('rebuild_started_at', 6)->nullable();
+            $table->timestamp('rebuild_started_at', 6)->nullable();
             $table->text('sweep_cursor')->nullable();
         });
 
         Schema::create($names->failures(), function (Blueprint $table): void {
             $table->text('subject_type');
-            $table->text('subject_id');
+            self::subjectId($table);
             $table->integer('attempts');
             $table->text('last_error_class');
-            $table->timestampTz('last_failed_at', 6);
+            $table->timestamp('last_failed_at', 6);
             $table->primary(['subject_type', 'subject_id']);
         });
     }
@@ -96,6 +103,15 @@ return new class extends Migration
         foreach ([$names->failures(), $names->state(), $names->changes(), $names->keys(), $names->entries()] as $table) {
             Schema::dropIfExists($table);
         }
+    }
+
+    private static function subjectId(Blueprint $table): void
+    {
+        match (SubjectKey::type()) {
+            'bigint' => $table->bigInteger('subject_id'),
+            'uuid' => $table->uuid('subject_id'),
+            'text' => $table->text('subject_id'),
+        };
     }
 
     private static function prefix(): string

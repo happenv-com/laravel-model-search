@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Postgres\Indexing;
 
 use Happenv\ModelSearch\Compilation\Sql;
+use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Illuminate\Database\Connection;
 use Illuminate\Database\DeadlockException;
@@ -50,7 +51,7 @@ final readonly class PoisonRecords
         $table = $this->table();
 
         $db->affectingStatement(
-            sprintf('INSERT INTO %1$s ("subject_type", "subject_id", "attempts", "last_error_class", "last_failed_at") VALUES (?, ?, 1, ?, clock_timestamp()) ON CONFLICT ("subject_type", "subject_id") DO UPDATE SET "attempts" = %1$s."attempts" + 1, "last_error_class" = EXCLUDED."last_error_class", "last_failed_at" = EXCLUDED."last_failed_at"', $table),
+            sprintf('INSERT INTO %1$s ("subject_type", "subject_id", "attempts", "last_error_class", "last_failed_at") VALUES (?, %2$s, 1, ?, clock_timestamp()) ON CONFLICT ("subject_type", "subject_id") DO UPDATE SET "attempts" = %1$s."attempts" + 1, "last_error_class" = EXCLUDED."last_error_class", "last_failed_at" = EXCLUDED."last_failed_at"', $table, SubjectKey::cast('?')),
             [$subjectType, $subjectId, $failure::class],
         );
     }
@@ -65,7 +66,7 @@ final readonly class PoisonRecords
         }
 
         $db->affectingStatement(
-            sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $this->table()),
+            sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(%s)', $this->table(), SubjectKey::arrayParameter()),
             [$subjectType, Sql::arrayLiteral($subjectIds)],
         );
     }
@@ -87,13 +88,13 @@ final readonly class PoisonRecords
         }
 
         if ($subjectIds !== null) {
-            $where .= ' AND "subject_id" = ANY(?::text[])';
+            $where .= ' AND "subject_id" = ANY('.SubjectKey::arrayParameter().')';
             $bindings[] = Sql::arrayLiteral($subjectIds);
         }
 
         return $db->transaction(function () use ($db, $where, $bindings): int {
             $queued = $db->affectingStatement(
-                sprintf('INSERT INTO %s ("node_type", "node_id") SELECT "subject_type", "subject_id" FROM %s WHERE true%s', $this->names->quoted($this->names->changes()), $this->table(), $where),
+                sprintf('INSERT INTO %s ("node_type", "node_id") SELECT "subject_type", "subject_id"::text FROM %s WHERE true%s', $this->names->quoted($this->names->changes()), $this->table(), $where),
                 $bindings,
             );
 
@@ -117,7 +118,7 @@ final readonly class PoisonRecords
 
         return $db->affectingStatement(
             sprintf(
-                'WITH "due" AS (UPDATE %1$s SET "last_failed_at" = clock_timestamp() WHERE %2$s RETURNING "subject_type", "subject_id") INSERT INTO %3$s ("node_type", "node_id") SELECT "subject_type", "subject_id" FROM "due"',
+                'WITH "due" AS (UPDATE %1$s SET "last_failed_at" = clock_timestamp() WHERE %2$s RETURNING "subject_type", "subject_id") INSERT INTO %3$s ("node_type", "node_id") SELECT "subject_type", "subject_id"::text FROM "due"',
                 $this->table(),
                 self::DUE,
                 $this->names->quoted($this->names->changes()),

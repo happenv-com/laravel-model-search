@@ -24,6 +24,7 @@ use Happenv\ModelSearch\Normalization\Normalizer;
 use Happenv\ModelSearch\Normalization\PhraseShape;
 use Happenv\ModelSearch\Normalization\QueryVariants;
 use Happenv\ModelSearch\Postgres\Schema\IndexPlan;
+use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Query\HostQuery;
 use Happenv\ModelSearch\Query\SearchQuery;
@@ -388,7 +389,7 @@ final class CandidateBranches
 
         return new Fragment(
             sprintf(
-                '(SELECT %1$d AS ti, s.%2$s::text AS subject_id, 0 AS level, CAST(? AS text) AS kind, s.source_value::text AS value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, %3$s AS s0, %4$d AS bk, true AS src, %5$d AS br, false AS ptr FROM (%6$s) AS s LIMIT %7$d)',
+                '(SELECT %1$d AS ti, s.%2$s::%8$s AS subject_id, 0 AS level, CAST(? AS text) AS kind, s.source_value::text AS value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, %3$s AS s0, %4$d AS bk, true AS src, %5$d AS br, false AS ptr FROM (%6$s) AS s LIMIT %7$d)',
                 $this->typeIndex,
                 Sql::ident(HostQuery::KEY_ALIAS),
                 $inStage->sql,
@@ -396,6 +397,7 @@ final class CandidateBranches
                 $this->nextBranch(),
                 $host['sql'],
                 $this->pool + 1,
+                SubjectKey::type(),
             ),
             [$field->kind, ...$inStage->bindings, ...$host['bindings']],
         );
@@ -422,7 +424,7 @@ final class CandidateBranches
 
         return new Fragment(
             sprintf(
-                '(SELECT %1$d AS ti, s.%2$s::text AS subject_id, 0 AS level, CAST(? AS text) AS kind, s.%3$s::text AS value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, false AS s0, %4$d AS bk, true AS src, %5$d AS br, false AS ptr FROM %6$s AS s JOIN unnest(?::text[]) AS v(variant) ON s.%3$s = v.variant%7$s LIMIT %8$d)',
+                '(SELECT %1$d AS ti, s.%2$s::%9$s AS subject_id, 0 AS level, CAST(? AS text) AS kind, s.%3$s::text AS value, CAST(NULL AS text) AS via, CAST(0 AS real) AS sim, false AS s0, %4$d AS bk, true AS src, %5$d AS br, false AS ptr FROM %6$s AS s JOIN unnest(?::text[]) AS v(variant) ON s.%3$s = v.variant%7$s LIMIT %8$d)',
                 $this->typeIndex,
                 Sql::ident($this->model->getKeyName()),
                 Sql::ident($field->path),
@@ -431,6 +433,7 @@ final class CandidateBranches
                 Sql::table($this->model),
                 $partition === null ? '' : sprintf(' AND s.%s = ?', Sql::ident($partition['column'])),
                 $this->pool + 1,
+                SubjectKey::type(),
             ),
             [$field->kind, Sql::arrayLiteral($variants), ...($partition === null ? [] : [$partition['value']])],
         );
@@ -504,7 +507,7 @@ final class CandidateBranches
 
         return new Fragment(
             sprintf(
-                '(SELECT %1$d AS ti, ch.%2$s::text AS subject_id, (%3$d + pc.level) AS level, CAST(? AS text) AS kind, CASE WHEN pc.kind = ANY(?::text[]) THEN NULL ELSE pc.value END AS value, CAST(? AS text) AS via, CAST(0 AS real) AS sim, %4$s AS s0, %5$d AS bk, false AS src, %6$d AS br, pc.over AS ptr FROM (%7$s) AS pc%8$s LEFT JOIN %9$s AS ch ON ch.%10$s = %11$s%14$s%12$s%15$s WHERE %16$s LIMIT %13$d)',
+                '(SELECT %1$d AS ti, ch.%2$s::%17$s AS subject_id, (%3$d + pc.level) AS level, CAST(? AS text) AS kind, CASE WHEN pc.kind = ANY(?::text[]) THEN NULL ELSE pc.value END AS value, CAST(? AS text) AS via, CAST(0 AS real) AS sim, %4$s AS s0, %5$d AS bk, false AS src, %6$d AS br, pc.over AS ptr FROM (%7$s) AS pc%8$s LEFT JOIN %9$s AS ch ON ch.%10$s = %11$s%14$s%12$s%15$s WHERE %16$s LIMIT %13$d)',
                 $this->typeIndex,
                 Sql::ident($this->model->getKeyName()),
                 Hit::VIA_OFFSET,
@@ -516,12 +519,13 @@ final class CandidateBranches
                 Sql::table($this->model),
                 Sql::ident($relation->getForeignKeyName()),
                 $childKey,
-                $this->staged ? sprintf(' LEFT JOIN %s AS ce ON ce.subject_type = ? AND ce.subject_id = ch.%s::text', $entries, Sql::ident($this->model->getKeyName())) : '',
+                $this->staged ? sprintf(' LEFT JOIN %s AS ce ON ce.subject_type = ? AND ce.subject_id = %s', $entries, SubjectKey::cast('ch.'.Sql::ident($this->model->getKeyName()))) : '',
                 $this->pool + 1,
                 $partition === null ? '' : sprintf(' AND ch.%s = ?', Sql::ident($partition['column'])),
                 $authorization->sql,
                 // A sentinel row for a pool of parents that gave no child carries the flag (round one, and apply, which refuses a cut list); round two has no use for it.
                 $strict ? 'auth.ok IS NOT NULL' : sprintf('ch.%s IS NOT NULL OR (pc.over AND pc.rn = 1)', Sql::ident($this->model->getKeyName())),
+                SubjectKey::type(),
             ),
             [$field->kind, Sql::arrayLiteral($revealing), $field->kind, ...$union->bindings, ...($partition === null ? [] : [$partition['value']]), ...$stageBindings, ...$authorization->bindings],
         );

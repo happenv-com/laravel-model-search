@@ -13,6 +13,7 @@ use Happenv\ModelSearch\Postgres\Indexing\RootResolver;
 use Happenv\ModelSearch\Postgres\Indexing\SearchIndexer;
 use Happenv\ModelSearch\Postgres\Schema\SchemaChange;
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
+use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Postgres\Session\PrivacyGate;
 use Happenv\ModelSearch\Postgres\Session\PrivacyVerdict;
@@ -61,6 +62,7 @@ final readonly class Doctor
         }
 
         return [
+            ...$this->subjectKeyType($db),
             ...$this->lag(),
             ...$this->schema(),
             ...$this->types(),
@@ -70,6 +72,38 @@ final readonly class Doctor
             ...$this->keyScans($db),
             ...$this->privacy($db),
         ];
+    }
+
+    /**
+     * The `subject_id` columns must have the type `model-search.subject_key_type` names: every statement binds and casts
+     * subject ids to it. A mismatch (an application's own migration with another type, or the setting changed after the
+     * tables were created) fails the drain and the searches, so the doctor names it before they do.
+     *
+     * @return list<Finding>
+     */
+    private function subjectKeyType(Connection $db): array
+    {
+        $expected = SubjectKey::type();
+        $findings = [];
+
+        foreach ([$this->names()->entries(), $this->names()->keys(), $this->names()->failures()] as $table) {
+            $row = $db->selectOne(
+                'SELECT format_type(a."atttypid", NULL) AS "type" FROM pg_attribute AS a WHERE a."attrelid" = to_regclass(?) AND a."attname" = \'subject_id\' AND NOT a."attisdropped"',
+                [$this->names()->quoted($table)],
+            );
+            $actual = is_object($row) && is_string($row->type ?? null) ? $row->type : null;
+
+            if ($actual !== null && $actual !== $expected) {
+                $findings[] = new Finding('subject-key-type', sprintf(
+                    'The column %s.subject_id has the type %s, but model-search.subject_key_type is %s.',
+                    $table,
+                    $actual,
+                    $expected,
+                ), $table);
+            }
+        }
+
+        return $findings;
     }
 
     /**

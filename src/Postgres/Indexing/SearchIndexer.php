@@ -11,6 +11,7 @@ use Happenv\ModelSearch\Events\SearchIndexChanged;
 use Happenv\ModelSearch\Events\SearchIndexLagging;
 use Happenv\ModelSearch\Exceptions\DrainInsideTransaction;
 use Happenv\ModelSearch\Jobs\DrainSearchIndex;
+use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
 use Illuminate\Database\Connection;
@@ -452,7 +453,7 @@ final class SearchIndexer
         $page = array_values(array_map(
             static fn (stdClass $row): string => (string) $row->subject_id,
             $db->select(
-                sprintf('SELECT "subject_id" FROM %s WHERE "subject_type" = ?%s ORDER BY "subject_id" LIMIT %d', $entries, $cursor === null ? '' : ' AND "subject_id" > ?', $limit),
+                sprintf('SELECT "subject_id" FROM %s WHERE "subject_type" = ?%s ORDER BY "subject_id" LIMIT %d', $entries, $cursor === null ? '' : ' AND "subject_id" > '.SubjectKey::cast('?'), $limit),
                 $cursor === null ? [$type] : [$type, $cursor],
             ),
         ));
@@ -473,8 +474,8 @@ final class SearchIndexer
             ));
 
             if ($gone !== []) {
-                $batch->keysDeleted += $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $keys), [$type, Sql::arrayLiteral($gone)]);
-                $batch->entriesDeleted += $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $entries), [$type, Sql::arrayLiteral($gone)]);
+                $batch->keysDeleted += $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(%s)', $keys, SubjectKey::arrayParameter()), [$type, Sql::arrayLiteral($gone)]);
+                $batch->entriesDeleted += $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(%s)', $entries, SubjectKey::arrayParameter()), [$type, Sql::arrayLiteral($gone)]);
                 $batch->touch($type);
             }
         }

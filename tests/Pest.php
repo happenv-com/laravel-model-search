@@ -27,5 +27,6 @@ uses(TestCase::class)->in(
     'Feature/Postgres/SearchSessionNestedTest.php',
     'Feature/Postgres/SimilarTest.php',
     'Feature/Postgres/StepConditionsTest.php',
+    'Feature/Postgres/SubjectKeyTypeTest.php',
     'Feature/Postgres/TriggersTest.php',
 );
