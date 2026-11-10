@@ -555,7 +555,7 @@ final class PathCompiler
      */
     private function step(Model $related, string $fromColumn, string $toColumn, string $shape, array $withScopes, string $connection, ?string $morphColumn = null, ?string $morphValue = null, bool $multiplies = false): array
     {
-        if (Sql::connectionName($related) !== $connection) {
+        if (Sql::baseConnectionName(Sql::connectionName($related)) !== Sql::baseConnectionName($connection)) {
             throw new UnsupportedRelation(sprintf('%s is on the connection "%s", but the path runs on "%s"; a path cannot cross connections.', $related::class, Sql::connectionName($related), $connection));
         }
 

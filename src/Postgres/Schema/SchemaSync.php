@@ -84,14 +84,15 @@ final readonly class SchemaSync
         $names = $this->names();
         $schema = $this->projectionSchema();
         $definitions = $this->registry->all();
-        $connectionName = $this->db()->getName();
+        // By base name: during `migrate` the default is the direct variant (`pgsql::direct`) of the models' connection.
+        $connectionName = Sql::baseConnectionName($this->db()->getName());
 
         /** @var array<string, array{table: string, quoted: string, entries: array<string, WatchedTable>, roots: array<string, true>}> $tables */
         $tables = [];
 
         foreach ($definitions as $definition) {
             foreach ($definition->watchedTables() as $watched) {
-                if ($watched->connection !== $connectionName) {
+                if (Sql::baseConnectionName($watched->connection) !== $connectionName) {
                     continue;
                 }
 
@@ -238,10 +239,10 @@ final readonly class SchemaSync
 
         $installs = [];
         $refusals = [];
-        $connection = $this->db()->getName();
+        $connection = Sql::baseConnectionName($this->db()->getName());
 
         foreach ($this->registry->all() as $definition) {
-            $tables = array_map(static fn (WatchedTable $table): string => $table->quotedTable, array_filter($definition->watchedTables(), static fn (WatchedTable $table): bool => $table->connection === $connection));
+            $tables = array_map(static fn (WatchedTable $table): string => $table->quotedTable, array_filter($definition->watchedTables(), static fn (WatchedTable $table): bool => Sql::baseConnectionName($table->connection) === $connection));
 
             if ($tables === []) {
                 // Nothing this connection watches: the definition belongs to another database's sync.
@@ -277,10 +278,10 @@ final readonly class SchemaSync
         $state = new IndexState($this->connection);
         $reasons = [];
 
-        $connection = $this->db()->getName();
+        $connection = Sql::baseConnectionName($this->db()->getName());
 
         foreach ($this->registry->all() as $definition) {
-            if (array_all($definition->watchedTables(), static fn (WatchedTable $table): bool => $table->connection !== $connection)) {
+            if (array_all($definition->watchedTables(), static fn (WatchedTable $table): bool => Sql::baseConnectionName($table->connection) !== $connection)) {
                 continue;
             }
 

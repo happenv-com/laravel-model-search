@@ -46,6 +46,12 @@ final readonly class SyncAfterMigrations
             throw $incomplete;
         }
 
+        // A sync that did nothing at all (a read-only database, a standby, another sync holding the lock) must not pass
+        // unnoticed: the migrations look done while the triggers and installs of new definitions are missing.
+        if ($outcome->skipped !== null) {
+            Log::warning(sprintf('model-search: the sync after the migrations was skipped (%s); run `php artisan model-search:sync`.', $outcome->skipped));
+        }
+
         foreach ($outcome->refusals as $refusal) {
             // A downgrade is the previous release running `migrate` during a blue/green deploy: it
             // must not fail the deploy, only say that it left the type alone.
