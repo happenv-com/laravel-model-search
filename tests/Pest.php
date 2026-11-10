@@ -28,5 +28,6 @@ uses(TestCase::class)->in(
     'Feature/Postgres/SimilarTest.php',
     'Feature/Postgres/StepConditionsTest.php',
     'Feature/Postgres/SubjectKeyTypeTest.php',
+    'Feature/Postgres/NodeKeyTypeTest.php',
     'Feature/Postgres/TriggersTest.php',
 );

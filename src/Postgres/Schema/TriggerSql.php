@@ -209,11 +209,10 @@ final readonly class TriggerSql
     private function insert(string $changes, WatchedTable $entry, string $record): string
     {
         return sprintf(
-            'INSERT INTO %s ("node_type", "node_id") VALUES (%s, %s.%s::text);',
+            'INSERT INTO %s ("node_type", "node_id") VALUES (%s, %s);',
             $changes,
             self::literal($entry->parentNodeType),
-            $record,
-            Sql::ident($entry->fkColumn),
+            NodeKey::cast($record.'.'.Sql::ident($entry->fkColumn)),
         );
     }
 

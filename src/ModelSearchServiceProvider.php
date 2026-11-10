@@ -9,6 +9,7 @@ use Happenv\ModelSearch\Console\DrainCommand;
 use Happenv\ModelSearch\Console\RebuildCommand;
 use Happenv\ModelSearch\Console\RetryFailuresCommand;
 use Happenv\ModelSearch\Console\SyncCommand;
+use Happenv\ModelSearch\Console\UninstallCommand;
 use Happenv\ModelSearch\Contracts\NullSearchTermObserver;
 use Happenv\ModelSearch\Contracts\SearchTermObserver;
 use Happenv\ModelSearch\Drivers\DriverManager;
@@ -46,7 +47,7 @@ final class ModelSearchServiceProvider extends ServiceProvider
         Event::listen(MigrationsEnded::class, SyncAfterMigrations::class);
 
         if ($this->app->runningInConsole()) {
-            $this->commands([SyncCommand::class, DrainCommand::class, RebuildCommand::class, RetryFailuresCommand::class, DoctorCommand::class]);
+            $this->commands([SyncCommand::class, DrainCommand::class, RebuildCommand::class, RetryFailuresCommand::class, DoctorCommand::class, UninstallCommand::class]);
         }
 
         $this->publishes([
