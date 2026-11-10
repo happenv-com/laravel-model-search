@@ -4,6 +4,17 @@ declare(strict_types=1);
 
 return [
     'table_prefix' => 'model_search_',
+
+    // Column type of `subject_id` in the index tables: the key type of the searched models. `bigint` follows Laravel's
+    // `id()`, `uuid` follows `HasUuids`, `text` holds any key (also models with different key types in one index).
+    // A model whose key does not fit is refused when its definition is compiled. Set it before the tables are created:
+    // the migration reads it, and an application that ships its own copy of the migration must use the same type.
+    'subject_key_type' => 'bigint',
+
+    // Whether the package runs its own migration. Turn it off when the application ships its own copy (published with
+    // the `model-search-migrations` tag, or rewritten to its conventions).
+    'run_migrations' => true,
+
     'driver' => 'postgres',
     'cache_store' => null,
     'partition_column' => null,

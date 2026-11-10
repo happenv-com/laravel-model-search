@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Postgres\Indexing;
 
 use Happenv\ModelSearch\Compilation\Sql;
+use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Illuminate\Database\Connection;
 
@@ -36,13 +37,15 @@ final readonly class DiffWriter
         }
 
         $idArray = Sql::arrayLiteral($rootIds);
+        $ids = SubjectKey::arrayParameter();
         $entries = $this->names->quoted($this->names->entries());
         $keys = $this->names->quoted($this->names->keys());
 
         $currentEntries = [];
 
         foreach ($db->select(
-            sprintf('SELECT "subject_id", "partition", "stage", "names", "sort_at"::text AS "sort_at" FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $entries),
+            // `sort_at` as a timestamptz in text, the form the contribution carries, whether the column has a time zone or not.
+            sprintf('SELECT "subject_id", "partition", "stage", "names", "sort_at"::timestamptz::text AS "sort_at" FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(%s)', $entries, $ids),
             [$subjectType, $idArray],
         ) as $row) {
             $currentEntries[(string) $row->subject_id] = $row;
@@ -52,7 +55,7 @@ final readonly class DiffWriter
         $subjectsWithKeys = [];
 
         foreach ($db->select(
-            sprintf('SELECT "subject_id", "kind", "key", "value", "partition", "stage" FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $keys),
+            sprintf('SELECT "subject_id", "kind", "key", "value", "partition", "stage" FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(%s)', $keys, $ids),
             [$subjectType, $idArray],
         ) as $row) {
             $currentKeys[$row->subject_id."\0".$row->kind."\0".$row->key] = $row;
@@ -122,13 +125,13 @@ final readonly class DiffWriter
         $keysDeleted = 0;
 
         if ($goneIds !== []) {
-            $keysDeleted += $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $keys), [$subjectType, Sql::arrayLiteral($goneIds)]);
-            $goneEntries = $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(?::text[])', $entries), [$subjectType, Sql::arrayLiteral($goneIds)]);
+            $keysDeleted += $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(%s)', $keys, $ids), [$subjectType, Sql::arrayLiteral($goneIds)]);
+            $goneEntries = $db->affectingStatement(sprintf('DELETE FROM %s WHERE "subject_type" = ? AND "subject_id" = ANY(%s)', $entries, $ids), [$subjectType, Sql::arrayLiteral($goneIds)]);
         }
 
         foreach (array_chunk($keyDeletes, self::CHUNK) as $chunk) {
             $keysDeleted += $db->affectingStatement(
-                sprintf('DELETE FROM %s AS k USING unnest(?::text[], ?::text[], ?::text[]) AS u("subject_id", "kind", "key") WHERE k."subject_type" = ? AND k."subject_id" = u."subject_id" AND k."kind" = u."kind" AND k."key" = u."key"', $keys),
+                sprintf('DELETE FROM %s AS k USING unnest(%s, ?::text[], ?::text[]) AS u("subject_id", "kind", "key") WHERE k."subject_type" = ? AND k."subject_id" = u."subject_id" AND k."kind" = u."kind" AND k."key" = u."key"', $keys, $ids),
                 [Sql::arrayLiteral(array_column($chunk, 0)), Sql::arrayLiteral(array_column($chunk, 1)), Sql::arrayLiteral(array_column($chunk, 2)), $subjectType],
             );
         }
@@ -136,8 +139,9 @@ final readonly class DiffWriter
         foreach (array_chunk($entryRows, self::CHUNK) as $chunk) {
             $db->affectingStatement(
                 sprintf(
-                    'INSERT INTO %s ("subject_type", "subject_id", "partition", "stage", "names", "sort_at", "indexed_at") SELECT ?, u."subject_id", u."partition", u."stage", u."names", u."sort_at"::timestamptz, clock_timestamp() FROM unnest(?::text[], ?::text[], ?::smallint[], ?::text[], ?::text[]) AS u("subject_id", "partition", "stage", "names", "sort_at") ON CONFLICT ("subject_type", "subject_id") DO UPDATE SET "partition" = EXCLUDED."partition", "stage" = EXCLUDED."stage", "names" = EXCLUDED."names", "sort_at" = EXCLUDED."sort_at", "indexed_at" = EXCLUDED."indexed_at"',
+                    'INSERT INTO %s ("subject_type", "subject_id", "partition", "stage", "names", "sort_at", "indexed_at") SELECT ?, u."subject_id", u."partition", u."stage", u."names", u."sort_at"::timestamptz, clock_timestamp() FROM unnest(%s, ?::text[], ?::smallint[], ?::text[], ?::text[]) AS u("subject_id", "partition", "stage", "names", "sort_at") ON CONFLICT ("subject_type", "subject_id") DO UPDATE SET "partition" = EXCLUDED."partition", "stage" = EXCLUDED."stage", "names" = EXCLUDED."names", "sort_at" = EXCLUDED."sort_at", "indexed_at" = EXCLUDED."indexed_at"',
                     $entries,
+                    $ids,
                 ),
                 [
                     $subjectType,
@@ -153,8 +157,9 @@ final readonly class DiffWriter
         foreach (array_chunk($keyRows, self::CHUNK) as $chunk) {
             $db->affectingStatement(
                 sprintf(
-                    'INSERT INTO %s ("subject_type", "subject_id", "partition", "kind", "key", "value", "stage") SELECT ?, u."subject_id", u."partition", u."kind", u."key", u."value", u."stage" FROM unnest(?::text[], ?::text[], ?::text[], ?::text[], ?::text[], ?::smallint[]) AS u("subject_id", "partition", "kind", "key", "value", "stage") ON CONFLICT ("subject_type", "subject_id", "kind", "key") DO UPDATE SET "partition" = EXCLUDED."partition", "value" = EXCLUDED."value", "stage" = EXCLUDED."stage"',
+                    'INSERT INTO %s ("subject_type", "subject_id", "partition", "kind", "key", "value", "stage") SELECT ?, u."subject_id", u."partition", u."kind", u."key", u."value", u."stage" FROM unnest(%s, ?::text[], ?::text[], ?::text[], ?::text[], ?::smallint[]) AS u("subject_id", "partition", "kind", "key", "value", "stage") ON CONFLICT ("subject_type", "subject_id", "kind", "key") DO UPDATE SET "partition" = EXCLUDED."partition", "value" = EXCLUDED."value", "stage" = EXCLUDED."stage"',
                     $keys,
+                    $ids,
                 ),
                 [
                     $subjectType,

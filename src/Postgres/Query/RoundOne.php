@@ -11,6 +11,7 @@ use Happenv\ModelSearch\Definition\Mode;
 use Happenv\ModelSearch\Definition\SearchField;
 use Happenv\ModelSearch\Drivers\Fragment;
 use Happenv\ModelSearch\Drivers\Hit;
+use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Query\HostQuery;
 use Happenv\ModelSearch\Query\SearchQuery;
@@ -147,7 +148,7 @@ ty(ti, alias, staged, lim) AS (VALUES %7$s),
 au AS (%8$s),
 ranked AS (
   SELECT a.ti, a.subject_id, a.level, a.kind, a.value, a.via, a.alts, a.in_s0, a.w, a.sim, e.sort_at,
-    row_number() OVER (PARTITION BY a.ti ORDER BY a.level, a.w DESC, a.sim DESC, e.sort_at DESC NULLS LAST, a.subject_id COLLATE "C") AS rn,
+    row_number() OVER (PARTITION BY a.ti ORDER BY a.level, a.w DESC, a.sim DESC, e.sort_at DESC NULLS LAST, a.subject_id%13$s) AS rn,
     count(*) OVER (PARTITION BY a.ti) AS n_pass
   FROM (SELECT x.*, count(*) FILTER (WHERE x.level %% %9$d > 0 AND x.in_s0) OVER (PARTITION BY x.ti) AS ne_s0 FROM au x) a
   JOIN ty ON ty.ti = a.ti
@@ -157,10 +158,10 @@ ranked AS (
 )
 SELECT 'row' AS rt, r.ti, r.subject_id, r.level, r.kind, r.value, r.via, r.alts::text AS alts, r.in_s0, CAST(r.rn AS integer) AS rn,
   CAST(NULL AS bigint) AS n_pass, CAST(NULL AS bigint) AS ne_s0, CAST(NULL AS boolean) AS s0_full, CAST(NULL AS boolean) AS any_full, CAST(NULL AS boolean) AS all_full, CAST(NULL AS boolean) AS via_full,
-  CAST(r.w AS integer) AS w, CAST(r.sim AS double precision) AS sim, CAST(EXTRACT(EPOCH FROM r.sort_at) AS double precision) AS sort_epoch
+  CAST(r.w AS integer) AS w, CAST(r.sim AS double precision) AS sim, CAST(EXTRACT(EPOCH FROM r.sort_at::timestamptz) AS double precision) AS sort_epoch
 FROM ranked r JOIN ty ON ty.ti = r.ti WHERE r.rn <= ty.lim
 UNION ALL
-SELECT 'flag', ty.ti, CAST(NULL AS text), CAST(NULL AS integer), CAST(NULL AS text), CAST(NULL AS text), CAST(NULL AS text), CAST(NULL AS text), CAST(NULL AS boolean), CAST(NULL AS integer),
+SELECT 'flag', ty.ti, CAST(NULL AS %12$s), CAST(NULL AS integer), CAST(NULL AS text), CAST(NULL AS text), CAST(NULL AS text), CAST(NULL AS text), CAST(NULL AS boolean), CAST(NULL AS integer),
   (SELECT count(*) FROM ranked r WHERE r.ti = ty.ti),
   (SELECT count(*) FROM au x WHERE x.ti = ty.ti AND x.level %% %9$d > 0 AND x.in_s0),
   coalesce(f.s0_full, false), coalesce(f.any_full, false), coalesce(f.all_full, false), coalesce(f.via_full, false),
@@ -178,6 +179,8 @@ SQL,
             Hit::VIA_OFFSET,
             $entries,
             $ctes->sql === '' ? '' : $ctes->sql.',',
+            SubjectKey::type(),
+            SubjectKey::collation(),
         );
 
         return [

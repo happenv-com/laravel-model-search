@@ -24,6 +24,7 @@ use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\UnknownDefinition;
 use Happenv\ModelSearch\Exceptions\UnsupportedStages;
 use Happenv\ModelSearch\Postgres\Indexing\IndexState;
+use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -189,6 +190,16 @@ final class ModelSearchRegistry
 
         $keySqlType = new ColumnTypes()->of($model, $model->getTable(), $model->getKeyName());
         IdNarrowing::assertKeyType($keySqlType);
+
+        // The database driver searches the source tables and keeps no index, so it stores no subject ids.
+        if (config('model-search.driver') !== 'database' && ! SubjectKey::fits($keySqlType)) {
+            throw new InvalidSearchDefinition(sprintf(
+                '%s has a key of the type "%s", but the index stores subject ids as %s (model-search.subject_key_type).',
+                $modelClass,
+                $keySqlType,
+                SubjectKey::type(),
+            ));
+        }
 
         $fields = $this->compilePaths($modelClass, $this->compileFields($modelClass, $definition), $definition->withScopes());
         $stages = $this->compileStages($modelClass, $definition);
