@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.0 - 2026-11-10
+
+- `model-search.subject_key_type` sets the column type of `subject_id`: `bigint` (default, like Laravel's `id()`), `uuid` (`HasUuids`) or `text` (any key, also mixed key types). Every statement binds, casts and orders subject ids in that type; the change log's `node_id` stays `text`.
+- A definition whose model key does not fit the setting is refused when it is compiled (`InvalidSearchDefinition`).
+- The doctor reports `subject-key-type` when a `subject_id` column has another type than the setting.
+- `model-search.run_migrations` (default `true`) lets an application ship its own copy of the migration; the migration is publishable with `--tag=model-search-migrations`.
+- Moment columns stay `timestamptz`: the database writes them itself and compares them with its own clock. The SQL also runs on `timestamp` columns of an application's own migration when all sessions share one `TimeZone`.
+- **Breaking:** the default `subject_id` type is now `bigint` (was always `text`). Set `subject_key_type` to `text` to keep the previous column for mixed key types. Existing tables are not altered.
+
 ## v0.3.1 - 2026-11-07
 
 - `SearchQuery::within()` accepts the builder of a concrete model (`Order::query()`, a custom builder class): the host and via builders are typed `Builder<covariant Model>`. Static analysis only; nothing changes at runtime.
