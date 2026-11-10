@@ -19,11 +19,13 @@ use Illuminate\Support\Facades\Schema;
  * is nullable and ids are unique per source table. The triggers write `changes.partition = NULL`;
  * the drain derives the partition from the root row.
  *
- * Column types follow Laravel's defaults: `subject_id` takes the type named by `model-search.subject_key_type`
- * (`bigint` like `id()`, `uuid`, or `text`), and the moments are `timestamp` without a time zone. They keep microseconds
- * (precision 6): a rebuild is told apart from its restart by the moment it started, and two restarts within one second
- * must not look the same. An application with other conventions (a `timestamptz` schema, its own prefix) turns
- * `model-search.run_migrations` off and ships its own copy; the package's SQL works with either.
+ * `subject_id` takes the type named by `model-search.subject_key_type` (`bigint` like Laravel's `id()`, `uuid`, or
+ * `text`). The moments are `timestamptz`, unlike Laravel's `timestamp()`: the database writes them itself
+ * (`clock_timestamp()`, also in the triggers, inside the session of whoever changed a watched row) and compares them
+ * with its own clock, so a column without a time zone would store each session's wall clock and skew lag, retry windows
+ * and the hand-off between releases by the difference between session time zones. They keep microseconds: a rebuild
+ * is told apart from its restart by the moment it started. An application with other conventions (its own prefix, its
+ * own naming) turns `model-search.run_migrations` off and ships its own copy.
  *
  * Privileges: the role that runs the sync owns these tables. The roles that write to the watched
  * tables need INSERT on the changes table (the triggers run as the invoker), and UPDATE on the
@@ -41,8 +43,8 @@ return new class extends Migration
             $table->text('partition')->nullable();
             $table->smallInteger('stage');
             $table->text('names')->default('');
-            $table->timestamp('sort_at', 6)->nullable();
-            $table->timestamp('indexed_at', 6);
+            $table->timestampTz('sort_at', 6)->nullable();
+            $table->timestampTz('indexed_at', 6);
             $table->primary(['subject_type', 'subject_id']);
         });
 
@@ -69,17 +71,17 @@ return new class extends Migration
             $table->text('node_type');
             $table->text('node_id');
             $table->text('partition')->nullable();
-            $table->timestamp('changed_at', 6)->default(DB::raw('clock_timestamp()'));
+            $table->timestampTz('changed_at', 6)->default(DB::raw('clock_timestamp()'));
         });
 
         Schema::create($names->state(), function (Blueprint $table): void {
             $table->text('subject_type')->primary();
             $table->text('definition_fingerprint');
             $table->bigInteger('definition_version');
-            $table->timestamp('installed_at', 6);
-            $table->timestamp('ready_at', 6)->nullable();
+            $table->timestampTz('installed_at', 6);
+            $table->timestampTz('ready_at', 6)->nullable();
             $table->text('rebuild_cursor')->nullable();
-            $table->timestamp('rebuild_started_at', 6)->nullable();
+            $table->timestampTz('rebuild_started_at', 6)->nullable();
             $table->text('sweep_cursor')->nullable();
         });
 
@@ -88,7 +90,7 @@ return new class extends Migration
             self::subjectId($table);
             $table->integer('attempts');
             $table->text('last_error_class');
-            $table->timestamp('last_failed_at', 6);
+            $table->timestampTz('last_failed_at', 6);
             $table->primary(['subject_type', 'subject_id']);
         });
     }

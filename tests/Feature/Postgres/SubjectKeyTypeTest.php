@@ -167,15 +167,15 @@ it('refuses a subject key type it does not know', function (): void {
     expect(static fn (): string => SubjectKey::type())->toThrow(InvalidSearchDefinition::class, 'must be one of bigint, uuid, text');
 });
 
-it('creates the tables with the configured subject key type and Laravel timestamps', function (): void {
+it('creates the tables with the configured subject key type and time-zone-aware moments', function (): void {
     config(['model-search.subject_key_type' => 'uuid', 'model-search.table_prefix' => 'skt_']);
 
     (require __DIR__.'/../../../database/migrations/2026_11_05_000000_create_model_search_tables.php')->up();
 
-    expect(sktColumnTypes('skt_entries'))->toContain('subject_id:uuid', 'sort_at:timestamp(6) without time zone')
+    expect(sktColumnTypes('skt_entries'))->toContain('subject_id:uuid', 'sort_at:timestamp(6) with time zone')
         ->and(sktColumnTypes('skt_keys'))->toContain('subject_id:uuid')
         ->and(sktColumnTypes('skt_failures'))->toContain('subject_id:uuid')
-        ->and(sktColumnTypes('skt_changes'))->toContain('node_id:text', 'changed_at:timestamp(6) without time zone');
+        ->and(sktColumnTypes('skt_changes'))->toContain('node_id:text', 'changed_at:timestamp(6) with time zone');
 });
 
 it('the doctor names subject id columns whose type differs from the setting', function (): void {
