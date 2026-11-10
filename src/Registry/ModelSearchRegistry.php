@@ -24,6 +24,7 @@ use Happenv\ModelSearch\Exceptions\InvalidSearchDefinition;
 use Happenv\ModelSearch\Exceptions\UnknownDefinition;
 use Happenv\ModelSearch\Exceptions\UnsupportedStages;
 use Happenv\ModelSearch\Postgres\Indexing\IndexState;
+use Happenv\ModelSearch\Postgres\Schema\NodeKey;
 use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Illuminate\Database\Eloquent\Model;
 
@@ -204,7 +205,7 @@ final class ModelSearchRegistry
         $fields = $this->compilePaths($modelClass, $this->compileFields($modelClass, $definition), $definition->withScopes());
         $stages = $this->compileStages($modelClass, $definition);
 
-        return new CompiledDefinition(
+        $compiled = new CompiledDefinition(
             modelClass: $modelClass,
             morphAlias: $model->getMorphClass(),
             keyType: KeyType::of($model),
@@ -217,6 +218,45 @@ final class ModelSearchRegistry
             withScopes: $definition->withScopes(),
             keySqlType: $keySqlType,
         );
+
+        if (config('model-search.driver') !== 'database') {
+            $this->assertNodeKeysFit($compiled, $model);
+        }
+
+        return $compiled;
+    }
+
+    /**
+     * Every key the triggers of this definition write to the change log (a child's foreign key to its parent, the root's
+     * own key) must fit `model-search.node_key_type`: a trigger that writes a key of another type would fail the write
+     * of the watched row, so the definition is refused here instead.
+     *
+     * @throws InvalidSearchDefinition
+     */
+    private function assertNodeKeysFit(CompiledDefinition $compiled, Model $model): void
+    {
+        if (NodeKey::type() === 'text') {
+            return;
+        }
+
+        NodeKey::assertConsistentWithSubjects();
+        $types = new ColumnTypes;
+
+        foreach ($compiled->watchedTables() as $table) {
+            // The table may live on another connection than the root: its type is read where it lives.
+            $type = $types->of($model->newInstance()->setConnection($table->connection), $table->table, $table->fkColumn);
+
+            if (! NodeKey::fits($type)) {
+                throw new InvalidSearchDefinition(sprintf(
+                    '%s watches %s.%s, a key of the type "%s", but the change log stores node ids as %s (model-search.node_key_type).',
+                    $compiled->modelClass,
+                    $table->table,
+                    $table->fkColumn,
+                    $type,
+                    NodeKey::type(),
+                ));
+            }
+        }
     }
 
     /**

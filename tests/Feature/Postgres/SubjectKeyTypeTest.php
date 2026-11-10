@@ -36,7 +36,8 @@ function sktRetype(string $type): void
     $names = TableNames::forConnection();
 
     foreach ([$names->entries(), $names->keys(), $names->failures()] as $table) {
-        DB::statement(sprintf('ALTER TABLE %1$s ALTER COLUMN "subject_id" TYPE %2$s USING "subject_id"::%2$s', $names->quoted($table), $type));
+        // The tables are empty: a typed NULL converts from any old type (there is no cast from bigint to uuid).
+        DB::statement(sprintf('ALTER TABLE %1$s ALTER COLUMN "subject_id" TYPE %2$s USING NULL::%2$s', $names->quoted($table), $type));
     }
 }
 

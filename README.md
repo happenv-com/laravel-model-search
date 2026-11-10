@@ -40,7 +40,9 @@ The index stores the key of every searched record in `subject_id`. Its column ty
 
 A definition whose model key does not fit is refused when it is compiled. The doctor reports `subject-key-type` when a `subject_id` column has another type than the setting says.
 
-An application with other conventions can own the migration instead: publish it with `php artisan vendor:publish --tag=model-search-migrations` (or write its own with the same tables and columns), adjust it, and set `model-search.run_migrations` to `false` so the package does not run its own copy as well. `subject_id` must have the type the setting names. The change log's `node_id` stays `text` whatever the setting: a node can be a row of any watched table.
+The change log's `node_id` has its own setting, `model-search.node_key_type`, `text` by default. A node is the key a trigger writes when a watched row changes: a child's foreign key to its parent, or a root's own key. `text` holds keys of any type, also when the watched tables key in different types (a uuid root with a bigint pivot or child). An application whose watched tables all key in one type can name it (`uuid`, `bigint`); it must then equal `subject_key_type`, because the drain writes roots back to the log as nodes. A definition that watches a key column of another type is refused when it is compiled, and the doctor reports `node-key-type` for a mismatched column.
+
+An application with other conventions can own the migration instead: publish it with `php artisan vendor:publish --tag=model-search-migrations` (or write its own with the same tables and columns), adjust it, and set `model-search.run_migrations` to `false` so the package does not run its own copy as well. `subject_id` and `node_id` must have the types the settings name. The copy's `down()` runs `php artisan model-search:uninstall` before dropping the tables: it removes the triggers and trigger functions the package installed, which would otherwise keep writing to a change log that no longer exists.
 
 Keep the moment columns `timestamptz` (precision 6), unlike Laravel's `timestamp()`. The database writes them itself with `clock_timestamp()`, also in the triggers, inside the session of whoever changed a watched row, and compares them with its own clock. A column without a time zone stores each session's wall clock, so sessions in different time zones skew the lag, the retry windows and the hand-off between releases by the difference. The SQL still runs on `timestamp` columns, but then every session that writes to a watched table or runs the package must use the same `TimeZone`.
 
@@ -389,6 +391,7 @@ A search phrase is personal data: it is typed by a person and may be a name, an 
 | `keys-without-entry`, `key-stage-drift` | the type |
 | `privacy` | the setting (`log_parameter_max_length_on_error`) when it cannot be set to 0; `null` for a logging violation |
 | `subject-key-type` | the table whose `subject_id` column has another type than `subject_key_type` |
+| `node-key-type` | the change log table, when its `node_id` column has another type than `node_key_type` |
 
 The codes are part of the public API: new codes may appear in minor releases, and an existing code is not renamed or removed before a major release.
 

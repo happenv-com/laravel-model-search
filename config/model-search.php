@@ -11,6 +11,11 @@ return [
     // the migration reads it, and an application that ships its own copy of the migration must use the same type.
     'subject_key_type' => 'bigint',
 
+    // Column type of `node_id` in the change log: the keys the triggers write (a child's foreign key to its parent, a
+    // root's own key). `text` holds keys of any type; an application whose watched tables all key in one type may name
+    // it, and then it must equal `subject_key_type`. A watched table whose key does not fit is refused when compiled.
+    'node_key_type' => 'text',
+
     // Whether the package runs its own migration. Turn it off when the application ships its own copy (published with
     // the `model-search-migrations` tag, or rewritten to its conventions).
     'run_migrations' => true,

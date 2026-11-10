@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Happenv\ModelSearch\Postgres\Indexing;
 
 use Happenv\ModelSearch\Compilation\Sql;
+use Happenv\ModelSearch\Postgres\Schema\NodeKey;
 use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Illuminate\Database\Connection;
@@ -94,7 +95,7 @@ final readonly class PoisonRecords
 
         return $db->transaction(function () use ($db, $where, $bindings): int {
             $queued = $db->affectingStatement(
-                sprintf('INSERT INTO %s ("node_type", "node_id") SELECT "subject_type", "subject_id"::text FROM %s WHERE true%s', $this->names->quoted($this->names->changes()), $this->table(), $where),
+                sprintf('INSERT INTO %s ("node_type", "node_id") SELECT "subject_type", %s FROM %s WHERE true%s', $this->names->quoted($this->names->changes()), NodeKey::cast('"subject_id"'), $this->table(), $where),
                 $bindings,
             );
 
@@ -118,10 +119,11 @@ final readonly class PoisonRecords
 
         return $db->affectingStatement(
             sprintf(
-                'WITH "due" AS (UPDATE %1$s SET "last_failed_at" = clock_timestamp() WHERE %2$s RETURNING "subject_type", "subject_id") INSERT INTO %3$s ("node_type", "node_id") SELECT "subject_type", "subject_id"::text FROM "due"',
+                'WITH "due" AS (UPDATE %1$s SET "last_failed_at" = clock_timestamp() WHERE %2$s RETURNING "subject_type", "subject_id") INSERT INTO %3$s ("node_type", "node_id") SELECT "subject_type", %4$s FROM "due"',
                 $this->table(),
                 self::DUE,
                 $this->names->quoted($this->names->changes()),
+                NodeKey::cast('"subject_id"'),
             ),
             [Sql::arrayLiteral($knownTypes)],
         );

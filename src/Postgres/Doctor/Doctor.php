@@ -11,6 +11,7 @@ use Happenv\ModelSearch\Exceptions\InstallRefused;
 use Happenv\ModelSearch\Postgres\Indexing\IndexState;
 use Happenv\ModelSearch\Postgres\Indexing\RootResolver;
 use Happenv\ModelSearch\Postgres\Indexing\SearchIndexer;
+use Happenv\ModelSearch\Postgres\Schema\NodeKey;
 use Happenv\ModelSearch\Postgres\Schema\SchemaChange;
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
 use Happenv\ModelSearch\Postgres\Schema\SubjectKey;
@@ -62,7 +63,7 @@ final readonly class Doctor
         }
 
         return [
-            ...$this->subjectKeyType($db),
+            ...$this->keyColumnTypes($db),
             ...$this->lag(),
             ...$this->schema(),
             ...$this->types(),
@@ -75,29 +76,38 @@ final readonly class Doctor
     }
 
     /**
-     * The `subject_id` columns must have the type `model-search.subject_key_type` names: every statement binds and casts
-     * subject ids to it. A mismatch (an application's own migration with another type, or the setting changed after the
-     * tables were created) fails the drain and the searches, so the doctor names it before they do.
+     * The key columns must have the types the settings name: every statement binds and casts `subject_id` to
+     * `model-search.subject_key_type` and `node_id` to `model-search.node_key_type`. A mismatch (an application's own
+     * migration with another type, or a setting changed after the tables were created) fails the triggers, the drain
+     * and the searches, so the doctor names it before they do.
      *
      * @return list<Finding>
      */
-    private function subjectKeyType(Connection $db): array
+    private function keyColumnTypes(Connection $db): array
     {
-        $expected = SubjectKey::type();
+        $names = $this->names();
         $findings = [];
+        $columns = [
+            [$names->entries(), 'subject_id', 'subject-key-type', SubjectKey::setting(), SubjectKey::type()],
+            [$names->keys(), 'subject_id', 'subject-key-type', SubjectKey::setting(), SubjectKey::type()],
+            [$names->failures(), 'subject_id', 'subject-key-type', SubjectKey::setting(), SubjectKey::type()],
+            [$names->changes(), 'node_id', 'node-key-type', NodeKey::setting(), NodeKey::type()],
+        ];
 
-        foreach ([$this->names()->entries(), $this->names()->keys(), $this->names()->failures()] as $table) {
+        foreach ($columns as [$table, $column, $code, $setting, $expected]) {
             $row = $db->selectOne(
-                'SELECT format_type(a."atttypid", NULL) AS "type" FROM pg_attribute AS a WHERE a."attrelid" = to_regclass(?) AND a."attname" = \'subject_id\' AND NOT a."attisdropped"',
-                [$this->names()->quoted($table)],
+                'SELECT format_type(a."atttypid", NULL) AS "type" FROM pg_attribute AS a WHERE a."attrelid" = to_regclass(?) AND a."attname" = ? AND NOT a."attisdropped"',
+                [$names->quoted($table), $column],
             );
             $actual = is_object($row) && is_string($row->type ?? null) ? $row->type : null;
 
             if ($actual !== null && $actual !== $expected) {
-                $findings[] = new Finding('subject-key-type', sprintf(
-                    'The column %s.subject_id has the type %s, but model-search.subject_key_type is %s.',
+                $findings[] = new Finding($code, sprintf(
+                    'The column %s.%s has the type %s, but model-search.%s is %s.',
                     $table,
+                    $column,
                     $actual,
+                    $setting,
                     $expected,
                 ), $table);
             }

@@ -7,6 +7,7 @@ namespace Happenv\ModelSearch\Postgres\Indexing;
 use Happenv\ModelSearch\Compilation\ReverseHop;
 use Happenv\ModelSearch\Compilation\Sql;
 use Happenv\ModelSearch\Definition\CompiledDefinition;
+use Happenv\ModelSearch\Postgres\Schema\NodeKey;
 use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Illuminate\Database\Connection;
 use Throwable;
@@ -117,7 +118,7 @@ final class RootResolver
         }
 
         return $db->affectingStatement(
-            sprintf('INSERT INTO %s ("node_type", "node_id") SELECT ?, u."id" FROM unnest(?::text[]) AS u("id")', $this->names->quoted($this->names->changes())),
+            sprintf('INSERT INTO %s ("node_type", "node_id") SELECT ?, u."id" FROM unnest(%s) AS u("id")', $this->names->quoted($this->names->changes()), NodeKey::arrayParameter()),
             [$alias, Sql::arrayLiteral($rootIds)],
         );
     }
@@ -192,7 +193,7 @@ final class RootResolver
             foreach ($hops as $hop) {
                 $query = $hop->rootsSql($type, [$node], PHP_INT_MAX);
                 $stats->spilledRoots += $db->affectingStatement(
-                    sprintf('INSERT INTO %s ("node_type", "node_id") SELECT ?, "s"."root_id" FROM (%s) AS "s"', $this->names->quoted($this->names->changes()), $query['sql']),
+                    sprintf('INSERT INTO %s ("node_type", "node_id") SELECT ?, %s FROM (%s) AS "s"', $this->names->quoted($this->names->changes()), NodeKey::cast('"s"."root_id"'), $query['sql']),
                     [$alias, ...$query['bindings']],
                 );
             }
