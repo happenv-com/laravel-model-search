@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.0 - 2026-11-10
+
+- `model-search.node_key_type` (`text` default, `uuid`, `bigint`) sets the column type of the change log's `node_id`. The triggers, the requeue of failures and the spill of roots write node ids in that type. The rendered trigger SQL is unchanged in text mode, so existing installs see no trigger drift.
+- A typed node key must equal `subject_key_type` (roots are written back to the log as nodes), and a definition that watches a key column of another type is refused when it is compiled.
+- The doctor reports `node-key-type` when the `node_id` column has another type than the setting.
+- `model-search:uninstall` removes the package's trigger functions and triggers, for the `down()` of an application's own copy of the migration.
+
 ## v0.4.0 - 2026-11-10
 
 - `model-search.subject_key_type` sets the column type of `subject_id`: `bigint` (default, like Laravel's `id()`), `uuid` (`HasUuids`) or `text` (any key, also mixed key types). Every statement binds, casts and orders subject ids in that type; the change log's `node_id` stays `text`.
