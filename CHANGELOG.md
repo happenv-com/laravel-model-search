@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.2 - 2026-11-11
+
+### What's Changed
+
+* chore: keep dev-only files out of the Composer dist archive by @webard in https://github.com/happenv-com/laravel-model-search/pull/10
+
+**Full Changelog**: https://github.com/happenv-com/laravel-model-search/compare/v0.5.1...v0.5.2
+
 ## v0.5.1 - 2026-11-11
 
 - `migrate` installs the triggers and types again when Laravel's migrator runs on the direct variant of a pooled connection (`pgsql::direct`). Connections are compared by their base name (`Sql::baseConnectionName()` strips `::read`, `::write` and `::direct`), so models that name the base connection are no longer taken for another database's. Found on the first production deploy behind PgBouncer: tables and indexes were created, triggers and installs were not, and nothing was reported. (#8)
