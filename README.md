@@ -418,6 +418,10 @@ foreach ($byCode as $code => $findings) {
 - With `each()` a `Prefix` page can come back shorter than the limit: the second round keeps at most 5 key rows per record and branch, so a record whose elements all match the phrase uses up several of them.
 - The `database` driver has no typo tolerance and scans the source tables.
 
+## AI assistants (Laravel Boost)
+
+The package ships a [Laravel Boost](https://laravel.com/docs/boost) skill, `laravel-model-search-development`, in `resources/boost/skills/`. `php artisan boost:install` (or `boost:update`) offers it to your coding agent: how to write a definition, search fail-closed, test with `drainNow()` and deploy, with the rules the compiler enforces.
+
 ## Licence
 
 MIT. See [LICENSE.md](LICENSE.md).
