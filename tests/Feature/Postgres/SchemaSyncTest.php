@@ -104,9 +104,9 @@ it('migrations ended installs triggers', function (): void {
 it('migrations ended installs the triggers when the migrator runs on the direct variant of the connection', function (): void {
     // Production: a pooled connection makes Laravel's migrator switch the default to `pgsql::direct` for the whole run,
     // while a model that names its connection keeps naming `pgsql`. The sync compared the two names and planned nothing.
-    $fixtures = app(ModelSearchRegistry::class);
+    $previousRegistry = app(ModelSearchRegistry::class);
     app()->instance(ModelSearchRegistry::class, tap(new ModelSearchRegistry, static fn (ModelSearchRegistry $registry) => $registry->register(ConnectedOrderSearch::class)));
-    DB::statement('DROP FUNCTION model_search_orders_fn() CASCADE');
+    DB::statement('DROP FUNCTION IF EXISTS model_search_orders_fn() CASCADE');
 
     try {
         DB::usingConnection('pgsql::direct', static fn () => event(new MigrationsEnded('up')));
@@ -115,7 +115,7 @@ it('migrations ended installs the triggers when the migrator runs on the direct 
             ->and(DB::table(TableNames::forConnection()->state())->where('subject_type', (new ConnectedOrder)->getMorphClass())->exists())->toBeTrue();
     } finally {
         // The truncation case keeps DDL: hand the fixture definitions back before afterEach syncs with prune.
-        app()->instance(ModelSearchRegistry::class, $fixtures);
+        app()->instance(ModelSearchRegistry::class, $previousRegistry);
     }
 });
 
