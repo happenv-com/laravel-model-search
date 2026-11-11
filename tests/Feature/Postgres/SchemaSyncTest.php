@@ -90,7 +90,7 @@ it('is in sync right after the migrations ran', function (): void {
 });
 
 it('migrations ended installs triggers', function (): void {
-    DB::statement('DROP FUNCTION model_search_orders_fn() CASCADE');
+    DB::statement('DROP FUNCTION IF EXISTS model_search_orders_fn() CASCADE');
     DB::statement('DROP INDEX '.indexName('keys_key'));
     expect(triggerNames())->not->toContain('model_search_orders_ins');
 
@@ -123,9 +123,12 @@ it('migrations ended reports a sync that was skipped', function (): void {
     Log::spy();
     DB::statement('SET default_transaction_read_only = on');
 
-    event(new MigrationsEnded('up'));
+    try {
+        event(new MigrationsEnded('up'));
+    } finally {
+        DB::statement('SET default_transaction_read_only = off');
+    }
 
-    DB::statement('SET default_transaction_read_only = off');
     Log::shouldHaveReceived('warning')->withArgs(static fn (string $message): bool => str_contains($message, 'the sync after the migrations was skipped (the database is read-only)'))->once();
 });
 
