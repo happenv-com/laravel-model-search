@@ -9,8 +9,11 @@ use Happenv\ModelSearch\Exceptions\SchemaSyncIncomplete;
 use Happenv\ModelSearch\Listeners\SyncAfterMigrations;
 use Happenv\ModelSearch\Postgres\Schema\SchemaChange;
 use Happenv\ModelSearch\Postgres\Schema\SchemaSync;
+use Happenv\ModelSearch\Postgres\Schema\TableNames;
 use Happenv\ModelSearch\Registry\ModelSearchRegistry;
+use Happenv\ModelSearch\Tests\Fixtures\Models\ConnectedOrder;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ConfigurableOrderSearch;
+use Happenv\ModelSearch\Tests\Fixtures\Searches\ConnectedOrderSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\CustomerSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\InvoiceSearch;
 use Happenv\ModelSearch\Tests\Fixtures\Searches\ParcelSearch;
@@ -20,6 +23,7 @@ use Illuminate\Database\Events\MigrationsEnded;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 uses(TruncationTestCase::class);
@@ -86,7 +90,7 @@ it('is in sync right after the migrations ran', function (): void {
 });
 
 it('migrations ended installs triggers', function (): void {
-    DB::statement('DROP FUNCTION model_search_orders_fn() CASCADE');
+    DB::statement('DROP FUNCTION IF EXISTS model_search_orders_fn() CASCADE');
     DB::statement('DROP INDEX '.indexName('keys_key'));
     expect(triggerNames())->not->toContain('model_search_orders_ins');
 
@@ -95,6 +99,37 @@ it('migrations ended installs triggers', function (): void {
     expect(triggerNames())->toContain('model_search_orders_ins', 'model_search_orders_upd', 'model_search_orders_del', 'model_search_orders_trunc')
         ->and(indexExists(indexName('keys_key')))->toBeTrue()
         ->and(sync()->diff())->toBe([]);
+});
+
+it('migrations ended installs the triggers when the migrator runs on the direct variant of the connection', function (): void {
+    // Production: a pooled connection makes Laravel's migrator switch the default to `pgsql::direct` for the whole run,
+    // while a model that names its connection keeps naming `pgsql`. The sync compared the two names and planned nothing.
+    $previousRegistry = app(ModelSearchRegistry::class);
+    app()->instance(ModelSearchRegistry::class, tap(new ModelSearchRegistry, static fn (ModelSearchRegistry $registry) => $registry->register(ConnectedOrderSearch::class)));
+    DB::statement('DROP FUNCTION IF EXISTS model_search_orders_fn() CASCADE');
+
+    try {
+        DB::usingConnection('pgsql::direct', static fn () => event(new MigrationsEnded('up')));
+
+        expect(triggerNames())->toContain('model_search_orders_ins', 'model_search_orders_upd', 'model_search_orders_del', 'model_search_orders_trunc')
+            ->and(DB::table(TableNames::forConnection()->state())->where('subject_type', (new ConnectedOrder)->getMorphClass())->exists())->toBeTrue();
+    } finally {
+        // The truncation case keeps DDL: hand the fixture definitions back before afterEach syncs with prune.
+        app()->instance(ModelSearchRegistry::class, $previousRegistry);
+    }
+});
+
+it('migrations ended reports a sync that was skipped', function (): void {
+    Log::spy();
+    DB::statement('SET default_transaction_read_only = on');
+
+    try {
+        event(new MigrationsEnded('up'));
+    } finally {
+        DB::statement('SET default_transaction_read_only = off');
+    }
+
+    Log::shouldHaveReceived('warning')->withArgs(static fn (string $message): bool => str_contains($message, 'the sync after the migrations was skipped (the database is read-only)'))->once();
 });
 
 it('migrations ended ignores a rollback and a pretend run', function (): void {

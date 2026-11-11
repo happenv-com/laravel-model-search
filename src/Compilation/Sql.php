@@ -20,6 +20,20 @@ final class Sql
         return $model->getConnectionName() ?? DB::getDefaultConnection();
     }
 
+    /**
+     * A connection name without Laravel's read, write and direct variants: `pgsql::direct`, `pgsql::read` and `pgsql`
+     * all reach the same database. Compare connections by it: during `migrate` the default connection is the direct
+     * variant of a pooled connection (Laravel's migrator switches to it), while a model keeps naming the base one.
+     */
+    public static function baseConnectionName(?string $name): ?string
+    {
+        if ($name === null) {
+            return null;
+        }
+
+        return preg_replace('/::(read|write|direct)$/', '', $name) ?? $name;
+    }
+
     public static function ident(string $name): string
     {
         return '"'.str_replace('"', '""', $name).'"';
