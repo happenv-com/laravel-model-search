@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.5.1 - 2026-11-11
+
+- `migrate` installs the triggers and types again when Laravel's migrator runs on the direct variant of a pooled connection (`pgsql::direct`). Connections are compared by their base name (`Sql::baseConnectionName()` strips `::read`, `::write` and `::direct`), so models that name the base connection are no longer taken for another database's. Found on the first production deploy behind PgBouncer: tables and indexes were created, triggers and installs were not, and nothing was reported. (#8)
+- The package ships a Laravel Boost skill, `laravel-model-search-development` (`resources/boost/skills/`), offered by `php artisan boost:install` / `boost:update`. (#9)
+
 ## v0.5.0 - 2026-11-10
 
 - `model-search.node_key_type` (`text` default, `uuid`, `bigint`) sets the column type of the change log's `node_id`. The triggers, the requeue of failures and the spill of roots write node ids in that type. The rendered trigger SQL is unchanged in text mode, so existing installs see no trigger drift.
