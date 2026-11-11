@@ -25,8 +25,12 @@ final class Sql
      * all reach the same database. Compare connections by it: during `migrate` the default connection is the direct
      * variant of a pooled connection (Laravel's migrator switches to it), while a model keeps naming the base one.
      */
-    public static function baseConnectionName(string $name): string
+    public static function baseConnectionName(?string $name): ?string
     {
+        if ($name === null) {
+            return null;
+        }
+
         return preg_replace('/::(read|write|direct)$/', '', $name) ?? $name;
     }
 
