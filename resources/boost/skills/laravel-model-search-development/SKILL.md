@@ -1,6 +1,12 @@
 ---
 name: laravel-model-search-development
-description: Define, query, index and deploy record searches with happenv-com/laravel-model-search (PostgreSQL pg_trgm projection). Use when writing or changing a ModelSearch definition or extension (SearchField::key/name/via, stages, where() conditions, each(), version()), when searching (query(), within(), withoutScope(), SearchQuery::palette(), apply(), similar()), when handling timedOut / indexBuilding / SearchTooBroad / SearchRateLimited, when scheduling the drain, testing with drainNow(), or deploying (model-search:sync, --prune, --check, doctor).
+description: >-
+  Define, query, index and deploy record searches with happenv-com/laravel-model-search
+  (PostgreSQL pg_trgm projection). Use when writing or changing a ModelSearch definition or
+  extension (SearchField::key/name/via, stages, where() conditions, each(), version()), when
+  searching (query(), within(), withoutScope(), SearchQuery::palette(), apply(), similar()),
+  when handling timedOut / indexBuilding / SearchTooBroad / SearchRateLimited, when scheduling
+  the drain, testing with drainNow(), or deploying (model-search:sync, --prune, --check, doctor).
 ---
 
 # Laravel Model Search
@@ -70,7 +76,7 @@ ModelSearches::extend(MarketOrderSearchExtension::class); // a ModelSearchExtens
 
 - `SearchField::key($path)`: identifiers (numbers, e-mails, phones, SKUs). Matched `Exact`, `Prefix`, `Suffix`; separators and case are folded.
 - `SearchField::name($path)`: names of people, companies and products, matched by word prefix; typo tolerance only through `similar()`.
-- `SearchField::via($relation, $kinds)`: finds a record through one `BelongsTo` parent, by the parent's fields of those kinds. An empty `$kinds` means every kind of the parent, e-mails and phones included, so list them.
+- `SearchField::via($relation, $kinds)`: finds a record through one `BelongsTo` parent, by the parent's fields of those kinds. Always list the kinds explicitly: an empty `$kinds` means every kind of the parent, e-mails and phones included, which is rarely what you want.
 - `$path` is a column or a dotted path through relations. The kind defaults to the last segment; override it with `->kind()`.
 - Modifiers: `label(Closure)` (always a closure, so it resolves in the viewer's locale), `exactOnSource()`, `each()` (the column is a list; every element is a key), `where($relation, $column, $value)`, `weight()`, `translatable()`, `revealUsing(fn ($record, $viewer): bool)`, `normalizeUsing(Normalizer)`.
 
